@@ -322,7 +322,7 @@ fn rename_re_retains_identity_record_with_new_name() {
     let pubkey = "9".repeat(64);
     let mut record = sample_record(&pubkey, "Fizz");
 
-    assert!(retain_agent_record(&conn, &keys, &record).unwrap());
+    assert!(retain_agent_record(&conn, &keys, &record, &[]).unwrap());
     let first = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &pubkey)
         .unwrap()
         .unwrap();
@@ -339,7 +339,7 @@ fn rename_re_retains_identity_record_with_new_name() {
 
     record.name = "Spark".to_string();
     assert!(
-        retain_agent_record(&conn, &keys, &record).unwrap(),
+        retain_agent_record(&conn, &keys, &record, &[]).unwrap(),
         "a renamed record must re-retain its identity record"
     );
 
@@ -372,7 +372,7 @@ fn retain_agent_record_is_noop_when_unchanged() {
     let pubkey = "8".repeat(64);
     let record = sample_record(&pubkey, "steady-agent");
 
-    assert!(retain_agent_record(&conn, &keys, &record).unwrap());
+    assert!(retain_agent_record(&conn, &keys, &record, &[]).unwrap());
     let row = get_retained_event(
         &conn,
         KIND_MANAGED_AGENT,
@@ -392,11 +392,141 @@ fn retain_agent_record_is_noop_when_unchanged() {
     .unwrap();
 
     assert!(
-        !retain_agent_record(&conn, &keys, &record).unwrap(),
+        !retain_agent_record(&conn, &keys, &record, &[]).unwrap(),
         "an unchanged projection must not re-retain"
     );
     assert!(
         get_pending_sync(&conn).unwrap().is_empty(),
         "no pending_sync churn for an unchanged record"
+    );
+}
+
+// ── Boot-reconcile publishes effective parallelism ────────────────────────────
+
+/// Boot-reconcile of a legacy OpenClaw record with parallelism 10 must
+/// publish 5 in the kind:30177 content, not 10.
+#[test]
+fn boot_reconcile_openclaw_publishes_capped_parallelism() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let pubkey = "c".repeat(64);
+
+    let mut record = sample_record(&pubkey, "openclaw-agent");
+    record.runtime = Some("openclaw".to_string());
+    record.agent_command = "openclaw".to_string();
+    record.parallelism = 10; // above cap
+
+    write_store(&dir, &[record]);
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let row = get_retained_event(
+        &conn,
+        KIND_MANAGED_AGENT,
+        &keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+
+    let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+    assert_eq!(
+        content["parallelism"].as_u64().unwrap(),
+        crate::managed_agents::OPENCLAW_MAX_PARALLELISM as u64,
+        "boot-reconcile must publish capped parallelism for OpenClaw legacy record"
+    );
+}
+
+/// Non-OpenClaw record: boot-reconcile must publish the raw parallelism
+/// unchanged (99 in, 99 out under the Option 2 contract).
+#[test]
+fn boot_reconcile_non_openclaw_publishes_raw_parallelism() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let pubkey = "d".repeat(64);
+
+    let mut record = sample_record(&pubkey, "goose-agent");
+    record.runtime = Some("goose".to_string());
+    record.agent_command = "goose".to_string();
+    record.parallelism = 8;
+
+    write_store(&dir, &[record]);
+    reconcile_agents_in_dir(dir.path(), &keys).unwrap();
+
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let row = get_retained_event(
+        &conn,
+        KIND_MANAGED_AGENT,
+        &keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+
+    let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+    assert_eq!(
+        content["parallelism"].as_u64().unwrap(),
+        8,
+        "non-OpenClaw boot-reconcile must not cap parallelism"
+    );
+}
+
+/// OpenClaw inbound normalization convergence:
+///
+/// 1. An OpenClaw record with parallelism 10 (above cap) is retained via
+///    `retain_agent_record` — the kind:30177 content must carry 5.
+/// 2. Re-calling `retain_agent_record` with the same record and content
+///    already matching → no-op (no pending_sync churn), proving idempotence.
+///
+/// This tests the retained-head convergence path independently of the full
+/// inbound event pipeline.
+#[test]
+fn retain_agent_record_openclaw_over_cap_queues_capped_content() {
+    let conn = open_retention_db(&std::path::PathBuf::from(":memory:")).unwrap();
+    let keys = nostr::Keys::generate();
+    let pubkey = "a".repeat(64);
+
+    let mut record = sample_record(&pubkey, "openclaw-convergence");
+    record.runtime = Some("openclaw".to_string());
+    record.agent_command = "openclaw".to_string();
+    record.parallelism = 10; // above cap
+
+    // First retain: content not yet present — must write and queue pending_sync.
+    assert!(retain_agent_record(&conn, &keys, &record, &[]).unwrap());
+
+    let owner = keys.public_key().to_hex();
+    let row = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &pubkey)
+        .unwrap()
+        .unwrap();
+    let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+    assert_eq!(
+        content["parallelism"].as_u64().unwrap(),
+        crate::managed_agents::OPENCLAW_MAX_PARALLELISM as u64,
+        "retained content must carry the capped parallelism (5), not 10"
+    );
+    assert!(
+        row.pending_sync,
+        "over-cap record must be queued for publish"
+    );
+
+    // Mark synced (simulates the flush loop confirming publish).
+    mark_synced(
+        &conn,
+        row.kind,
+        &row.pubkey,
+        &row.d_tag,
+        row.created_at,
+        &row.content,
+    )
+    .unwrap();
+
+    // Second retain with identical record: projection unchanged — must be a no-op.
+    assert!(
+        !retain_agent_record(&conn, &keys, &record, &[]).unwrap(),
+        "re-retain of an unchanged OpenClaw record must be a no-op"
+    );
+    assert!(
+        get_pending_sync(&conn).unwrap().is_empty(),
+        "no pending_sync churn when projection is unchanged"
     );
 }

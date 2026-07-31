@@ -176,7 +176,12 @@ pub(super) fn deploy_payload_json(
         "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
-        "parallelism": record.parallelism,
+        "parallelism": crate::managed_agents::effective_parallelism(
+            // The provider executes record.agent_command — use that pinned
+            // command as the policy identity so the cap follows the payload.
+            &record.agent_command,
+            record.parallelism,
+        ),
         "respond_to": record.respond_to,
         "respond_to_allowlist": &record.respond_to_allowlist,
         "env_vars": merged_env,

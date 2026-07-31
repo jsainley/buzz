@@ -852,7 +852,6 @@ pub async fn update_managed_agent(
         }
         // turn_timeout_seconds is intentionally not applied here —
         // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
-        // Use idle_timeout_seconds or max_turn_duration_seconds instead.
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty falls back to the workspace relay at
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
@@ -871,8 +870,8 @@ pub async fn update_managed_agent(
         // threads the user's explicit intent — see `apply_agent_command_update`
         // and `update_time_agent_command_override` for the full resolution
         // rules.
+        let personas = load_personas(&app).unwrap_or_default();
         if let Some(agent_command) = input.agent_command {
-            let personas = load_personas(&app).unwrap_or_default();
             crate::managed_agents::apply_agent_command_update(
                 record,
                 &personas,
@@ -928,7 +927,8 @@ pub async fn update_managed_agent(
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
         }
-
+        let cmd = crate::managed_agents::record_agent_command(record, &personas);
+        crate::managed_agents::normalize_instance_parallelism(record, &cmd);
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;

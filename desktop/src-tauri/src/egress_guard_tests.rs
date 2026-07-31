@@ -77,7 +77,7 @@ fn error_names_the_boundary_context() {
 // Boundaries 6 and 7 (`submit_engram_event` twins) are module-private inside
 // `commands`; their injection tests live next to them:
 //   - commands/team_snapshot/tests.rs::egress_guard_boundary
-//   - commands/personas/snapshot/import.rs::egress_guard_tests
+//   - commands/personas/snapshot/import_egress_tests.rs::blocks_ncryptsec_before_network
 
 /// Boundary 1: `relay/submit.rs` `submit_event_at_with_keys` (the funnel for
 /// all `submit_event*` variants).
@@ -244,7 +244,12 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/relay/submit.rs", 1, 1),                      // boundaries 1 + 3 (shared funnel)
     ("src/huddle/pipeline.rs", 1, 1),                   // boundary 5
     ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
-    ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
+    ("src/commands/personas/snapshot/import.rs", 1, 1), // boundary 7
+    (
+        "src/commands/personas/snapshot/import_egress_tests.rs",
+        1,
+        0,
+    ), // boundary 7 injection-test fixture URL
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
     // Test-only fixtures — no production egress, no guard:
     ("src/relay_admission.rs", 1, 0),
@@ -417,6 +422,7 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/commands/team_snapshot.rs",
         "src/commands/team_snapshot/tests.rs",
         "src/commands/personas/snapshot/import.rs",
+        "src/commands/personas/snapshot/import_egress_tests.rs",
         "src/native_websocket.rs",
     ];
 

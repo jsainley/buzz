@@ -190,6 +190,39 @@ fn reserved_keys_include_relay_url() {
     assert!(merged.is_empty());
 }
 
+#[test]
+fn reserved_keys_include_buzz_acp_agents() {
+    // BUZZ_ACP_AGENTS is a Buzz-owned control-plane key: overriding it would
+    // diverge the running pool from the UI-visible Parallelism field and
+    // bypass per-harness caps; a non-integer value crash-loops buzz-acp.
+    assert!(is_reserved_env_key("BUZZ_ACP_AGENTS"));
+    assert!(is_reserved_env_key("buzz_acp_agents")); // case-insensitive
+    assert!(is_reserved_env_key("Buzz_ACP_AGENTS")); // mixed case
+
+    // Save-time: validate_user_env_keys must reject it.
+    let env = map(&[("BUZZ_ACP_AGENTS", "20")]);
+    let err = validate_user_env_keys(&env).unwrap_err();
+    assert!(
+        err.contains("BUZZ_ACP_AGENTS"),
+        "error must name the reserved key, got: {err}"
+    );
+
+    // Runtime stripping: merged_user_env must silently drop it.
+    let stripped = merged_user_env(&BTreeMap::new(), &env);
+    assert!(
+        stripped.is_empty(),
+        "BUZZ_ACP_AGENTS must be stripped at runtime"
+    );
+
+    // Pre-existing persisted value is also stripped (defense in depth).
+    let persona_env = map(&[("BUZZ_ACP_AGENTS", "10")]);
+    let stripped = merged_user_env(&persona_env, &BTreeMap::new());
+    assert!(
+        stripped.is_empty(),
+        "pre-existing BUZZ_ACP_AGENTS in persona env must be stripped"
+    );
+}
+
 // ── validate_user_env_keys ─────────────────────────────────────────
 
 #[test]

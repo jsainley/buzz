@@ -24,6 +24,7 @@ use super::{
     agent_events::build_agent_event,
     persona_events::monotonic_created_at,
     retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
+    types::AgentDefinition,
     ManagedAgentRecord,
 };
 use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
@@ -95,16 +96,28 @@ fn reconcile_agents_in_dir_at(
     let conn =
         open_retention_db(db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
 
+    // Partition the unified store into definitions (pubkey empty) and instances.
+    // Definitions act as the persona slice for `record_agent_command` so that
+    // persona-inherited records (runtime: None after an "inherit" update)
+    // resolve the live persona runtime rather than falling back to a stale
+    // `agent_command` field.
+    let all_records: Vec<ManagedAgentRecord> = records;
+    let definitions: Vec<AgentDefinition> = all_records
+        .iter()
+        .filter(|r| r.pubkey.is_empty())
+        .filter_map(|r| r.to_definition_view())
+        .collect();
+
     let mut reconciled = 0u32;
 
-    for record in &records {
+    for record in &all_records {
         // A record without a pubkey has no event coordinate yet (key-less
         // agents mint keys on first start) — nothing to reconcile.
         if record.pubkey.is_empty() {
             continue;
         }
 
-        if retain_agent_record(&conn, keys, record)? {
+        if retain_agent_record(&conn, keys, record, &definitions)? {
             reconciled += 1;
         }
     }
@@ -117,6 +130,12 @@ fn reconcile_agents_in_dir_at(
 /// Returns `Ok(true)` when a row was (re)written and `Ok(false)` when the
 /// retained content already matches (a true no-op — no `pending_sync` churn).
 ///
+/// `personas` is the live persona/definition slice used to resolve the harness
+/// command for persona-inherited records (runtime: None after an "inherit"
+/// update). Pass the loaded persona slice when available; pass `&[]` when
+/// unavailable and accept the policy-command fallback for records with no
+/// materialized runtime.
+///
 /// This is the single content-diff + monotonic-bump engine shared by the
 /// boot-time reconcile above and the interactive edit paths
 /// (`retain_managed_agent_pending`, persona-rename propagation). Every
@@ -126,6 +145,7 @@ pub(crate) fn retain_agent_record(
     conn: &rusqlite::Connection,
     keys: &nostr::Keys,
     record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
 ) -> Result<bool, String> {
     let owner_pubkey = keys.public_key().to_hex();
     let existing = get_retained_event(conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
@@ -137,7 +157,7 @@ pub(crate) fn retain_agent_record(
     // it serializes — republishing every agent every boot. Content is
     // timestamp-independent, so the monotonic bump below never forces a
     // spurious republish; an unchanged agent is still a true no-op.
-    let event = build_agent_event(record)?
+    let event = build_agent_event(record, personas)?
         .custom_created_at(monotonic_created_at(
             existing.as_ref().map(|row| row.created_at),
         ))

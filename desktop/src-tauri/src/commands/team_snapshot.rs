@@ -103,6 +103,25 @@ fn effective_avatar(member: &AgentSnapshot) -> Option<String> {
         .or_else(|| member.profile.avatar_url.clone())
 }
 
+/// Compute the effective instance parallelism for a team snapshot import member.
+///
+/// This is the single production seam for the parallelism cap in team imports.
+/// Both the import loop ([`confirm_team_snapshot_import`]) and tests call this
+/// function — removing or changing the cap logic here breaks both.
+///
+/// The runtime id is resolved via the three-tier lookup
+/// (static builtins → static preset list → loaded registry), so preset
+/// harnesses (e.g. openclaw) resolve correctly even with a cold registry.
+pub(crate) fn member_instance_parallelism(
+    runtime_id: Option<&str>,
+    minted_parallelism: Option<u32>,
+) -> u32 {
+    crate::managed_agents::effective_instance_parallelism(
+        runtime_id,
+        minted_parallelism.unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+    )
+}
+
 /// Build a definition from a team member snapshot without consuming its memory.
 fn definition_from_snapshot(
     member: &AgentSnapshot,
@@ -567,8 +586,15 @@ pub async fn confirm_team_snapshot_import(
             turn_timeout_seconds: 0,
             idle_timeout_seconds: member.definition.idle_timeout_seconds,
             max_turn_duration_seconds: member.definition.max_turn_duration_seconds,
-            parallelism: minted_parallelism
-                .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+            parallelism: {
+                // Effective instance parallelism via the shared production seam.
+                // Tested directly via `member_instance_parallelism`; removing
+                // this call breaks both production and the import regression test.
+                member_instance_parallelism(
+                    member.definition.runtime.as_deref(),
+                    minted_parallelism,
+                )
+            },
             system_prompt: member.definition.system_prompt.clone(),
             model: member.definition.model.clone(),
             provider: member.definition.provider.clone(),
@@ -859,7 +885,12 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
-        let content = serde_json::to_string(&agent_event_content(record))
+        // Load the live persona slice so persona-inherited records project
+        // the live persona runtime into kind:30177 rather than the stale
+        // agent_command field. Best-effort: errors produce an empty slice.
+        let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
+        let effective_cmd = crate::managed_agents::record_agent_command(record, &personas);
+        let content = serde_json::to_string(&agent_event_content(record, &effective_cmd))
             .map_err(|e| format!("failed to serialize agent content: {e}"))?;
         let (owner_pubkey, event) = {
             let keys = &scope.owner_keys;
@@ -869,7 +900,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
             if existing.as_ref().is_some_and(|row| row.content == content) {
                 return Ok(());
             }
-            let event = build_agent_event(record)?
+            let event = build_agent_event(record, &personas)?
                 .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
                 .sign_with_keys(keys)
                 .map_err(|e| format!("failed to sign agent event: {e}"))?;

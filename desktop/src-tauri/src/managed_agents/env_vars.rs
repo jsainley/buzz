@@ -50,6 +50,11 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 ///    relay URL would silently break the saved security settings (the UI
 ///    shows owner-only while the running agent answers anyone, for
 ///    example), or redirect the agent to an attacker-controlled relay.
+/// 4. **Buzz-owned control-plane keys** — overriding would diverge the
+///    running resource from the UI-visible field, or crash the harness on
+///    a malformed value (e.g. `BUZZ_ACP_AGENTS` with a non-integer crashes
+///    buzz-acp at argument parsing; a value above the harness cap silently
+///    overrides the per-harness pool limit set by the Desktop).
 ///
 /// This list is deliberately narrow — it only covers keys with security
 /// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
@@ -91,6 +96,12 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Buzz-owned control-plane: the harness worker-pool size is set by the
+    // Desktop based on the per-harness cap and the user's Parallelism field.
+    // An env override would diverge the running pool from the UI-visible
+    // value and bypass per-harness caps; a non-integer value crash-loops
+    // buzz-acp at argument parsing.
+    "BUZZ_ACP_AGENTS",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

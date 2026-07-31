@@ -164,12 +164,35 @@ fn reconcile_inbound_persona_event_blocking(
         }
         KIND_MANAGED_AGENT => {
             let mut agents = load_managed_agents(&app)?;
+            let personas = load_personas(&app).unwrap_or_default();
             apply_inbound_managed_agent(
                 &mut agents,
                 &d_tag,
                 managed_agent_content_from_event(&event)?,
+                &personas,
             );
             save_managed_agents(&app, &agents)?;
+            // Re-retain the locally normalized projection so the relay head
+            // converges to the capped value. retain_agent_record is a content-diff
+            // engine — if the accepted event already carried the capped value (or
+            // the agent is not OpenClaw), this is a no-op (echo-loop guard).
+            if let Some(normalized) = agents.iter().find(|r| r.pubkey == d_tag) {
+                if let Ok(scope) =
+                    crate::managed_agents::retention::active_retention_scope(&app, &state)
+                {
+                    if let Ok(conn) =
+                        crate::managed_agents::retention::open_retention_db(&scope.db_path)
+                    {
+                        // Reuse the same persona slice already loaded above.
+                        let _ = crate::managed_agents::reconcile::retain_agent_record(
+                            &conn,
+                            &scope.owner_keys,
+                            normalized,
+                            &personas,
+                        );
+                    }
+                }
+            }
         }
         _ => unreachable!("kind gated above"),
     }
@@ -373,6 +396,11 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
 /// untouched. The projection type carries none of them, so they cannot be
 /// reached here even if a foreign event tried to inject them.
 ///
+/// `personas` is the live persona/definition slice used to resolve the harness
+/// command for persona-inherited records (runtime: None after an "inherit"
+/// update). Pass `&[]` when no persona context is available; records with a
+/// materialized `runtime` or `agent_command_override` are unaffected.
+///
 /// No match is a no-op: managed agents carry device-local secrets and are never
 /// minted from a relay event — an agent that does not already exist locally has
 /// no secret key to run with, so inserting a secretless shell would be useless
@@ -382,6 +410,7 @@ fn apply_inbound_managed_agent(
     agents: &mut [ManagedAgentRecord],
     d_tag: &str,
     inbound: ManagedAgentEventContent,
+    personas: &[AgentDefinition],
 ) {
     if let Some(local) = agents.iter_mut().find(|record| record.pubkey == d_tag) {
         local.name = inbound.name;
@@ -401,6 +430,14 @@ fn apply_inbound_managed_agent(
         local.parallelism = inbound.parallelism;
         local.respond_to = inbound.respond_to;
         local.respond_to_allowlist = inbound.respond_to_allowlist;
+
+        // Apply the per-harness parallelism cap using the persona-aware
+        // effective command. `record_agent_command` resolves override → runtime
+        // → persona runtime → default, so persona-inherited records
+        // (runtime: None after an "inherit" update) follow the live persona
+        // runtime rather than the stale agent_command.
+        let effective_cmd = crate::managed_agents::record_agent_command(local, personas);
+        crate::managed_agents::normalize_instance_parallelism(local, &effective_cmd);
     }
 }
 

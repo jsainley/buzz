@@ -62,12 +62,22 @@ pub struct ManagedAgentEventContent {
 /// Project a `ManagedAgentRecord` onto the content fields published in
 /// managed-agent events.
 ///
+/// `effective_cmd` is the already-resolved harness command for this record
+/// (override → runtime → persona runtime → default). Callers that have the
+/// full persona slice should resolve it via `record_agent_command`; callers
+/// without persona context should pass the record's own materialized command
+/// (e.g. `record.agent_command` for definition-less records) or the runtime
+/// resolved from the record fields.
+///
 /// This is the single source of truth for what leaves the device. The
 /// retention upsert compares the serialized projection to suppress a
 /// re-publish when only excluded runtime/local fields changed, so an
 /// operational start/stop produces an identical projection and never
 /// republishes.
-pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventContent {
+pub fn agent_event_content(
+    record: &ManagedAgentRecord,
+    effective_cmd: &str,
+) -> ManagedAgentEventContent {
     // Slimmed projection (NIP-AP "Slimming: kind:30177"): definition-linked
     // instances resolve prompt/model/provider/source_version through their
     // kind:30175 definition, so those fields are omitted from the wire.
@@ -100,7 +110,12 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         } else {
             record.persona_source_version.clone()
         },
-        parallelism: record.parallelism,
+        // Use the caller-resolved effective command — covers persona-inherited
+        // records whose `record.runtime` is None after an "inherit" update.
+        parallelism: crate::managed_agents::effective_parallelism(
+            effective_cmd,
+            record.parallelism,
+        ),
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
     }
@@ -108,10 +123,20 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
 
 /// Build a kind:30177 event from a `ManagedAgentRecord`.
 ///
+/// `personas` is the live persona/definition slice. It is used to resolve the
+/// harness command for persona-inherited records (runtime: None, persona_id
+/// set) so the published parallelism matches what actually spawns. Pass `&[]`
+/// when personas are unavailable (e.g. boot-reconcile from a raw store read);
+/// records whose runtime is materialized on the record itself are unaffected.
+///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits. The
 /// `d_tag` is the agent's pubkey.
-pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, String> {
-    let content = serde_json::to_string(&agent_event_content(record))
+pub fn build_agent_event(
+    record: &ManagedAgentRecord,
+    personas: &[super::types::AgentDefinition],
+) -> Result<EventBuilder, String> {
+    let effective_cmd = super::discovery::record_agent_command(record, personas);
+    let content = serde_json::to_string(&agent_event_content(record, &effective_cmd))
         .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
     let tags =
         vec![Tag::parse(["d", record.pubkey.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
@@ -219,9 +244,15 @@ mod tests {
         }
     }
 
+    /// Convenience: resolve the effective command for a test agent using the
+    /// same function as production (no persona slice needed for these fixtures).
+    fn cmd(agent: &ManagedAgentRecord) -> String {
+        super::super::discovery::record_agent_command(agent, &[])
+    }
+
     #[test]
     fn build_agent_event_produces_correct_kind() {
-        let builder = build_agent_event(&sample_agent()).unwrap();
+        let builder = build_agent_event(&sample_agent(), &[]).unwrap();
         let keys = nostr::Keys::generate();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind.as_u16() as u32, KIND_MANAGED_AGENT);
@@ -229,7 +260,7 @@ mod tests {
 
     #[test]
     fn d_tag_is_agent_pubkey() {
-        let builder = build_agent_event(&sample_agent()).unwrap();
+        let builder = build_agent_event(&sample_agent(), &[]).unwrap();
         let keys = nostr::Keys::generate();
         let event = builder.sign_with_keys(&keys).unwrap();
         let d = event
@@ -249,7 +280,8 @@ mod tests {
     /// carry secrets, the provider backend blob, env vars, or runtime fields.
     #[test]
     fn content_excludes_secrets_and_runtime_fields() {
-        let json = serde_json::to_string(&agent_event_content(&sample_agent())).unwrap();
+        let agent = sample_agent();
+        let json = serde_json::to_string(&agent_event_content(&agent, &cmd(&agent))).unwrap();
 
         // Secrets — must never appear.
         assert!(
@@ -309,7 +341,7 @@ mod tests {
     #[test]
     fn projection_slims_definition_quad_only_when_linked() {
         let linked = sample_agent(); // persona_id: Some
-        let json = serde_json::to_string(&agent_event_content(&linked)).unwrap();
+        let json = serde_json::to_string(&agent_event_content(&linked, &cmd(&linked))).unwrap();
         assert!(!json.contains("system_prompt"));
         assert!(!json.contains("\"model\""));
         assert!(!json.contains("\"provider\""));
@@ -320,7 +352,8 @@ mod tests {
 
         let mut standalone = sample_agent();
         standalone.persona_id = None;
-        let json = serde_json::to_string(&agent_event_content(&standalone)).unwrap();
+        let json =
+            serde_json::to_string(&agent_event_content(&standalone, &cmd(&standalone))).unwrap();
         assert!(json.contains("system_prompt"), "standalone keeps prompt");
         assert!(json.contains("\"model\""), "standalone keeps model");
         assert!(json.contains("\"provider\""), "standalone keeps provider");
@@ -333,8 +366,8 @@ mod tests {
     #[test]
     fn projection_is_deterministic() {
         let agent = sample_agent();
-        let a = serde_json::to_string(&agent_event_content(&agent)).unwrap();
-        let b = serde_json::to_string(&agent_event_content(&agent)).unwrap();
+        let a = serde_json::to_string(&agent_event_content(&agent, &cmd(&agent))).unwrap();
+        let b = serde_json::to_string(&agent_event_content(&agent, &cmd(&agent))).unwrap();
         assert_eq!(a, b);
     }
 
@@ -350,8 +383,8 @@ mod tests {
         churned.last_error = Some("different error".to_string());
         churned.updated_at = "2099-12-31T00:00:00Z".to_string();
         assert_eq!(
-            agent_event_content(&agent),
-            agent_event_content(&churned),
+            agent_event_content(&agent, &cmd(&agent)),
+            agent_event_content(&churned, &cmd(&churned)),
             "runtime field churn must not alter the published projection"
         );
     }
@@ -362,7 +395,10 @@ mod tests {
         let agent = sample_agent();
         let mut edited = agent.clone();
         edited.parallelism += 1;
-        assert_ne!(agent_event_content(&agent), agent_event_content(&edited));
+        assert_ne!(
+            agent_event_content(&agent, &cmd(&agent)),
+            agent_event_content(&edited, &cmd(&edited))
+        );
 
         // Definition-level edit surfaces only for definition-less records —
         // linked records resolve the prompt through their definition.
@@ -371,14 +407,14 @@ mod tests {
         let mut edited = standalone.clone();
         edited.system_prompt = Some("A different prompt.".to_string());
         assert_ne!(
-            agent_event_content(&standalone),
-            agent_event_content(&edited)
+            agent_event_content(&standalone, &cmd(&standalone)),
+            agent_event_content(&edited, &cmd(&edited))
         );
         let mut linked_edit = sample_agent();
         linked_edit.system_prompt = Some("A different prompt.".to_string());
         assert_eq!(
-            agent_event_content(&sample_agent()),
-            agent_event_content(&linked_edit),
+            agent_event_content(&sample_agent(), &cmd(&sample_agent())),
+            agent_event_content(&linked_edit, &cmd(&linked_edit)),
             "a linked record's local prompt snapshot is not wire state"
         );
     }
@@ -450,5 +486,200 @@ mod tests {
             .tags
             .iter()
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
+    }
+
+    // ── kind:30177 parallelism cap in wire projection ─────────────────────
+
+    /// Legacy OpenClaw record with parallelism 10: the wire projection must
+    /// emit 5 (capped), not 10. This is the boot-reconcile case — a stale
+    /// record on disk must not broadcast the over-cap value to other devices.
+    #[test]
+    fn wire_projection_caps_openclaw_parallelism() {
+        let mut agent = sample_agent();
+        agent.persona_id = None; // definition-less so parallelism is always emitted
+        agent.runtime = Some("openclaw".to_string());
+        agent.agent_command = "openclaw".to_string();
+        agent.parallelism = 10;
+
+        let content = agent_event_content(&agent, &cmd(&agent));
+        assert_eq!(
+            content.parallelism,
+            crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
+            "wire projection must cap OpenClaw parallelism to {}, got {}",
+            crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
+            content.parallelism
+        );
+    }
+
+    /// Non-OpenClaw record: wire projection must pass through raw parallelism
+    /// unchanged (the cap is the identity function for uncapped harnesses).
+    #[test]
+    fn wire_projection_passes_through_non_openclaw_parallelism() {
+        let mut agent = sample_agent();
+        agent.runtime = Some("goose".to_string());
+        agent.agent_command = "goose".to_string();
+        agent.parallelism = 24;
+
+        let content = agent_event_content(&agent, &cmd(&agent));
+        assert_eq!(
+            content.parallelism, 24,
+            "non-OpenClaw parallelism must not be capped"
+        );
+    }
+
+    /// OpenClaw record with parallelism already at or below the cap: must be
+    /// emitted as-is (the cap is a min, not a clamp-to-exactly-5).
+    #[test]
+    fn wire_projection_honors_openclaw_parallelism_at_or_below_cap() {
+        let mut agent = sample_agent();
+        agent.runtime = Some("openclaw".to_string());
+        agent.agent_command = "openclaw".to_string();
+
+        for p in [1u32, 3, 5] {
+            agent.parallelism = p;
+            let content = agent_event_content(&agent, &cmd(&agent));
+            assert_eq!(
+                content.parallelism, p,
+                "OpenClaw parallelism {p} (at or below cap) must not be changed"
+            );
+        }
+    }
+
+    /// runtime=openclaw, override=goose: policy follows the OVERRIDE → goose is
+    /// uncapped, so 10 is emitted as-is on the wire.
+    #[test]
+    fn wire_projection_follows_override_over_runtime_uncapped() {
+        let mut agent = sample_agent();
+        agent.runtime = Some("openclaw".to_string());
+        agent.agent_command_override = Some("goose".to_string());
+        agent.parallelism = 10;
+
+        let content = agent_event_content(&agent, &cmd(&agent));
+        assert_eq!(
+            content.parallelism, 10,
+            "goose override on openclaw runtime: wire projection must NOT cap (goose is uncapped)"
+        );
+    }
+
+    /// runtime=goose, override=openclaw: policy follows the OVERRIDE → openclaw
+    /// is capped, so 10 → 5 on the wire even though the stored runtime says goose.
+    #[test]
+    fn wire_projection_follows_override_over_runtime_capped() {
+        let mut agent = sample_agent();
+        agent.runtime = Some("goose".to_string());
+        agent.agent_command = "goose".to_string();
+        agent.agent_command_override = Some("openclaw".to_string());
+        agent.parallelism = 10;
+
+        let content = agent_event_content(&agent, &cmd(&agent));
+        assert_eq!(
+            content.parallelism,
+            crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
+            "openclaw override on goose runtime: wire projection must cap to {}",
+            crate::managed_agents::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Persona-inherited record: runtime=None after "inherit from persona" update,
+    /// live persona runtime=goose. Wire projection must follow the live persona
+    /// command (goose, uncapped), not the stale agent_command.
+    ///
+    /// This exercises `build_agent_event(record, personas)` passing personas so the
+    /// projection uses `record_agent_command` instead of the context-free fallback.
+    #[test]
+    fn wire_projection_persona_inherited_runtime_none_uses_live_persona_command() {
+        use crate::managed_agents::types::AgentDefinition;
+        // A persona with runtime=goose.
+        let persona = AgentDefinition {
+            id: "persona-goose".to_string(),
+            display_name: String::new(),
+            avatar_url: None,
+            system_prompt: String::new(),
+            runtime: Some("goose".to_string()),
+            model: None,
+            provider: None,
+            name_pool: vec![],
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            env_vars: std::collections::BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            parallelism: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        // A persona-linked instance whose runtime was cleared by "inherit" update.
+        // The stale agent_command says "openclaw" (from before inherit).
+        let mut agent = sample_agent();
+        agent.persona_id = Some("persona-goose".to_string());
+        agent.runtime = None; // cleared by apply_agent_command_update (inherit path)
+        agent.agent_command = "openclaw".to_string(); // stale legacy field
+        agent.agent_command_override = None;
+        agent.parallelism = 10;
+
+        // With live persona context: record_agent_command → goose (uncapped).
+        let personas = vec![persona];
+        let content = agent_event_content(
+            &agent,
+            &super::super::discovery::record_agent_command(&agent, &personas),
+        );
+        assert_eq!(
+            content.parallelism, 10,
+            "persona-inherited (runtime=None) linked to goose: wire projection must NOT cap; \
+             got {} — live persona runtime must win over stale agent_command",
+            content.parallelism
+        );
+    }
+
+    /// The inverse: persona runtime=openclaw, stale agent_command=goose.
+    /// Wire projection must cap to 5 (follows live persona, not stale command).
+    #[test]
+    fn wire_projection_persona_inherited_openclaw_caps_despite_stale_goose_command() {
+        use crate::managed_agents::types::AgentDefinition;
+        let persona = AgentDefinition {
+            id: "persona-openclaw".to_string(),
+            display_name: String::new(),
+            avatar_url: None,
+            system_prompt: String::new(),
+            runtime: Some("openclaw".to_string()),
+            model: None,
+            provider: None,
+            name_pool: vec![],
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            env_vars: std::collections::BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            parallelism: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let mut agent = sample_agent();
+        agent.persona_id = Some("persona-openclaw".to_string());
+        agent.runtime = None;
+        agent.agent_command = "goose".to_string(); // stale
+        agent.agent_command_override = None;
+        agent.parallelism = 10;
+
+        let personas = vec![persona];
+        let content = agent_event_content(
+            &agent,
+            &super::super::discovery::record_agent_command(&agent, &personas),
+        );
+        assert_eq!(
+            content.parallelism,
+            crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
+            "persona-inherited (runtime=None) linked to openclaw: wire projection must cap to {}; \
+             stale goose agent_command must NOT suppress the cap",
+            crate::managed_agents::OPENCLAW_MAX_PARALLELISM
+        );
     }
 }

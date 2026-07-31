@@ -151,7 +151,10 @@ pub(crate) fn spawn_config_hash(
     }
     record.idle_timeout_seconds.hash(&mut hasher);
     record.max_turn_duration_seconds.hash(&mut hasher);
-    record.parallelism.hash(&mut hasher);
+    // Hash the effective (clamped) parallelism so edits that both clamp to
+    // the same cap (e.g. OpenClaw 10 → 8) do not badge a false restart.
+    crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism)
+        .hash(&mut hasher);
 
     hasher.finish()
 }

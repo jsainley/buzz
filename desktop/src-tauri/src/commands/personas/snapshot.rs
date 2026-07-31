@@ -448,6 +448,10 @@ pub async fn encode_agent_snapshot_for_send(
 #[cfg(test)]
 mod fidelity_tests;
 #[cfg(test)]
+mod import_egress_tests;
+#[cfg(test)]
+mod import_parallelism_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

@@ -86,6 +86,7 @@ pub struct AgentDefinition {
     pub respond_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
+    /// Requested parallelism — portable, never clamped (may exceed a device's harness cap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
     pub created_at: String,
@@ -257,13 +258,11 @@ pub struct ManagedAgentRecord {
     pub agent_args: Vec<String>,
     /// Create-time snapshot of the catalog MCP command. Never read at spawn —
     /// the effective MCP command is always re-derived from the runtime catalog
-    /// (`known_acp_runtime`) — and no longer written by updates. Kept for
-    /// serde compatibility with existing stores.
+    /// (`known_acp_runtime`). Kept for serde compatibility with existing stores.
     pub mcp_command: String,
     /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the
-    /// desktop no longer emits or edits it. Kept for serde compatibility with
-    /// existing stores; use `idle_timeout_seconds` or
-    /// `max_turn_duration_seconds` for turn-length control.
+    /// desktop no longer emits or edits it. Kept for serde compatibility;
+    /// use `idle_timeout_seconds` or `max_turn_duration_seconds` instead.
     pub turn_timeout_seconds: u64,
     /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
     /// may stay silent on its ACP channel mid-turn before the harness times
@@ -273,6 +272,7 @@ pub struct ManagedAgentRecord {
     /// Absolute wall-clock cap per turn.
     #[serde(default)]
     pub max_turn_duration_seconds: Option<u64>,
+    /// Effective parallelism — device-clamped, normalized at every persistence boundary, equals BUZZ_ACP_AGENTS at spawn.
     #[serde(default = "default_agent_parallelism")]
     pub parallelism: u32,
     pub system_prompt: Option<String>,

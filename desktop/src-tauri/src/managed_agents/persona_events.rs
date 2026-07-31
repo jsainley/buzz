@@ -464,23 +464,42 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
-    // Drop a stale create-time harness pin when the definition names a
-    // different known runtime; custom commands stay pinned.
-    if let Some(def_runtime) = persona
+    // Drop a stale create-time harness pin when the definition switches to a
+    // different known runtime (builtin, static preset, or loaded custom). A pin
+    // that names an unknown/custom command is always kept.
+    //
+    // Both sides are resolved through the canonical harness-identity resolver
+    // (`canonical_harness_command`) which accepts either a runtime id OR a
+    // command string — covering aliases (e.g. "claude-code-acp"), path prefixes
+    // ("/usr/local/bin/goose"), and harnesses whose id ≠ command. The persona
+    // runtime side is resolved via `command_for_runtime_id` (id-only input is
+    // sufficient there since persona.runtime is always an authoritative id).
+    //
+    // Comparison is on canonical primary commands so "goose", "/usr/local/bin/goose",
+    // and runtime id "goose" all represent the same harness; the stale pin is
+    // dropped only when the canonical commands differ.
+    if let Some(new_cmd) = persona
         .runtime
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .and_then(crate::managed_agents::known_acp_runtime_exact)
+        .and_then(super::command_for_runtime_id)
     {
-        if let Some(pin_runtime) = record
+        if let Some(pin) = record
             .agent_command_override
             .as_deref()
-            .and_then(crate::managed_agents::known_acp_runtime)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
         {
-            if !std::ptr::eq(pin_runtime, def_runtime) {
-                record.agent_command_override = None;
+            // Resolve the pin via the canonical resolver (accepts id OR command).
+            if let Some(pin_cmd) = super::canonical_harness_command(pin) {
+                if pin_cmd != new_cmd {
+                    // Known harness switched to a different known harness — drop stale pin.
+                    record.agent_command_override = None;
+                }
+                // Same harness: keep the pin (e.g. explicit path override for same runtime).
             }
+            // Custom/unknown pin: always keep.
         }
     }
     // env_vars stay overrides-only. Self-heal records written before the env
@@ -492,6 +511,15 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
         .env_vars
         .retain(|k, v| persona.env_vars.get(k) != Some(v));
     record.persona_source_version = Some(snapshot.source_version);
+
+    // After all persona fields (including runtime) have been applied, normalize
+    // the instance parallelism to the harness cap for the newly resolved command.
+    // Pass the persona as the definition slice so records with runtime: None
+    // (cleared by an "inherit from persona" update) resolve the live persona
+    // runtime instead of falling back to a stale `record.agent_command`.
+    let effective_cmd =
+        crate::managed_agents::record_agent_command(record, std::slice::from_ref(persona));
+    crate::managed_agents::normalize_instance_parallelism(record, &effective_cmd);
 }
 
 /// Preview what `record` would look like immediately after the start/restore
@@ -521,5 +549,7 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+#[cfg(test)]
+mod parallelism_tests;
 #[cfg(test)]
 mod tests;

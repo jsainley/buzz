@@ -304,14 +304,14 @@ pub fn build_managed_agent_summary(
         team_id: record.team_id.clone(),
         relay_url: record.relay_url.clone(),
         acp_command: record.acp_command.clone(),
-        agent_command: descriptor.command,
         agent_command_override: record.agent_command_override.clone(),
         agent_args: descriptor.args,
         mcp_command: effective_mcp_command,
         turn_timeout_seconds: record.turn_timeout_seconds,
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
-        parallelism: record.parallelism,
+        parallelism: super::effective_parallelism(&descriptor.command, record.parallelism),
+        agent_command: descriptor.command,
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
         model: effective_model,
@@ -702,7 +702,6 @@ pub fn spawn_agent_child(
         // ordering relative to that call is NOT what makes this safe — the
         // reserved-key strip (guard 1) handles user env regardless of order.
         command.env_remove("BUZZ_ACP_SETUP_PAYLOAD");
-
         // Set the payload only when desktop computed NotReady.
         if let Some(json) = setup_payload_json {
             command.env("BUZZ_ACP_SETUP_PAYLOAD", json);
@@ -721,11 +720,11 @@ pub fn spawn_agent_child(
     if let Some(idle) = record.idle_timeout_seconds {
         command.env("BUZZ_ACP_IDLE_TIMEOUT", idle.to_string());
     }
-
     if let Some(max_dur) = record.max_turn_duration_seconds {
         command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     }
-    command.env("BUZZ_ACP_AGENTS", record.parallelism.to_string());
+    let acp_agents = super::acp_agents_value(effective_command, record.parallelism);
+    command.env("BUZZ_ACP_AGENTS", acp_agents);
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {

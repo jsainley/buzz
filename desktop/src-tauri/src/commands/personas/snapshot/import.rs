@@ -211,7 +211,12 @@ pub(crate) fn resolve_snapshot_import_behavior(
 }
 
 const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
-
+pub(crate) fn snapshot_instance_parallelism(runtime: Option<&str>, minted: Option<u32>) -> u32 {
+    crate::managed_agents::effective_instance_parallelism(
+        runtime,
+        minted.unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+    )
+}
 /// Decode a `buzz-agent-snapshot v1` manifest from raw bytes.
 ///
 /// Sniffs by magic bytes (PNG signature) first, then falls back to JSON.
@@ -614,8 +619,10 @@ pub async fn confirm_agent_snapshot_import(
             turn_timeout_seconds: 0,
             idle_timeout_seconds: snapshot.definition.idle_timeout_seconds,
             max_turn_duration_seconds: snapshot.definition.max_turn_duration_seconds,
-            parallelism: minted_parallelism
-                .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+            parallelism: snapshot_instance_parallelism(
+                snapshot.definition.runtime.as_deref(),
+                minted_parallelism,
+            ),
             system_prompt: snapshot.definition.system_prompt.clone(),
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),
@@ -764,8 +771,12 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
-        let content = serde_json::to_string(&agent_event_content(record))
-            .map_err(|e| format!("failed to serialize agent content: {e}"))?;
+        let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
+        let content = serde_json::to_string(&agent_event_content(
+            record,
+            &crate::managed_agents::record_agent_command(record, &personas),
+        ))
+        .map_err(|e| format!("failed to serialize agent content: {e}"))?;
         let (owner_pubkey, event) = {
             let keys = &scope.owner_keys;
             let owner_pubkey = keys.public_key().to_hex();
@@ -774,7 +785,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
             if existing.as_ref().is_some_and(|row| row.content == content) {
                 return Ok(());
             }
-            let event = build_agent_event(record)?
+            let event = build_agent_event(record, &personas)?
                 .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
                 .sign_with_keys(keys)
                 .map_err(|e| format!("failed to sign agent event: {e}"))?;
@@ -854,35 +865,6 @@ pub(crate) async fn submit_engram_event(
         return Err(format!("relay rejected engram: {message}"));
     }
     Ok(())
-}
-
-// ── NIP-49 egress guard: boundary 7 (persona snapshot engram submit) ─────────
-
-#[cfg(test)]
-mod egress_guard_tests {
-    use super::submit_engram_event;
-
-    const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
-
-    /// An engram body carrying an ncryptsec must be rejected by the guard
-    /// before any network I/O (the target port is a discard address; a guard
-    /// error — not a connection error — proves the abort ordering).
-    #[tokio::test]
-    async fn blocks_ncryptsec_before_network() {
-        let state = crate::app_state::build_app_state();
-        let keys = nostr::Keys::generate();
-        let body = format!("{{\"content\":\"{NCRYPTSEC}\"}}");
-        let err = submit_engram_event(
-            &state,
-            &keys,
-            body.as_bytes(),
-            "http://127.0.0.1:9/events",
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.contains("key-backup material"), "{err}");
-    }
 }
 
 #[cfg(test)]

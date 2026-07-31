@@ -5,10 +5,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        effective_parallelism, ensure_persona_is_active, find_managed_agent_mut,
+        load_managed_agents, load_personas, load_teams, managed_agent_avatar_url,
+        normalize_agent_args, provider_deploy, resolve_provider_binary, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
         ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
@@ -49,10 +49,10 @@ pub(super) fn retain_managed_agent_pending(
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
-        // Shared engine with the boot-time reconcile: projection content diff
-        // (no republish for runtime-only churn) + monotonic created_at bump
-        // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        // Persona slice for persona-inherited records (runtime: None after "inherit" update).
+        let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
+        // Content-diff engine: no republish for runtime-only churn (NIP-AP step 3).
+        retain_agent_record(&conn, &scope.owner_keys, record, &personas).map(|_| ())
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
@@ -845,18 +845,19 @@ pub async fn create_managed_agent(
                 .filter(|value| !value.is_empty())
                 .unwrap_or(DEFAULT_ACP_COMMAND)
                 .to_string(),
+            parallelism: effective_parallelism(
+                &agent_command,
+                minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
+            ),
             agent_command,
             agent_command_override,
             agent_args,
             mcp_command,
-            // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;
-            // store the schema default only. Use idle_timeout_seconds or
-            // max_turn_duration_seconds for actual turn-length control.
+            // BUZZ_ACP_TURN_TIMEOUT is deprecated; use idle_timeout_seconds or max_turn_duration_seconds.
             turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
-            parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
             system_prompt: snapshot_prompt.or_else(|| {
                 input
                     .system_prompt
@@ -914,7 +915,6 @@ pub async fn create_managed_agent(
                 relay_mesh.clone()
             },
         };
-
         records.push(record);
 
         save_managed_agents(&app, &records)?;

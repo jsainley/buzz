@@ -761,3 +761,47 @@ mod egress_guard_boundary {
         assert!(err.contains("key-backup material"), "{err}");
     }
 }
+
+// ── Team snapshot import: OpenClaw parallelism contract ──────────────────────
+
+#[test]
+fn team_import_openclaw_definition_stores_requested_parallelism() {
+    // `definition_from_snapshot` stores the portable requested parallelism from
+    // the snapshot (via behavior.parallelism) WITHOUT clamping — the instance
+    // construction (which happens later) applies the device-local cap.
+    let mut m = member("OpenClaw Agent");
+    m.definition.runtime = Some("openclaw".to_string());
+    m.definition.respond_to = Some("owner-only".to_string());
+    m.definition.parallelism = Some(10); // requested value above the OpenClaw cap
+
+    let def = definition_from_snapshot(&m, false, "2026-01-01T00:00:00Z")
+        .expect("definition_from_snapshot must succeed");
+
+    assert_eq!(
+        def.parallelism,
+        Some(10),
+        "team import: AgentDefinition.parallelism must preserve the requested 10 (not clamped to 5)"
+    );
+}
+
+#[test]
+fn team_import_openclaw_instance_parallelism_is_capped() {
+    // Drives the production seam: `member_instance_parallelism` is the exact
+    // function the import loop calls. Removing or changing it fails this test.
+    assert_eq!(
+        super::member_instance_parallelism(Some("openclaw"), Some(10)),
+        crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
+        "team import: OpenClaw instance must be capped at {}, not the requested 10",
+        crate::managed_agents::OPENCLAW_MAX_PARALLELISM
+    );
+}
+
+#[test]
+fn team_import_non_openclaw_instance_parallelism_is_not_capped() {
+    // Non-OpenClaw harnesses pass through unchanged via member_instance_parallelism.
+    assert_eq!(
+        super::member_instance_parallelism(Some("goose"), Some(10)),
+        10,
+        "goose team import: parallelism 10 must not be capped"
+    );
+}
