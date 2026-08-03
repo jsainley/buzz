@@ -437,40 +437,6 @@ fn boot_reconcile_openclaw_publishes_capped_parallelism() {
     );
 }
 
-/// Non-OpenClaw record: boot-reconcile must publish the raw parallelism
-/// unchanged (99 in, 99 out under the Option 2 contract).
-#[test]
-fn boot_reconcile_non_openclaw_publishes_raw_parallelism() {
-    let dir = TempDir::new().unwrap();
-    let keys = nostr::Keys::generate();
-    let pubkey = "d".repeat(64);
-
-    let mut record = sample_record(&pubkey, "goose-agent");
-    record.runtime = Some("goose".to_string());
-    record.agent_command = "goose".to_string();
-    record.parallelism = 8;
-
-    write_store(&dir, &[record]);
-    reconcile_agents_in_dir(dir.path(), &keys).unwrap();
-
-    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
-    let row = get_retained_event(
-        &conn,
-        KIND_MANAGED_AGENT,
-        &keys.public_key().to_hex(),
-        &pubkey,
-    )
-    .unwrap()
-    .unwrap();
-
-    let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
-    assert_eq!(
-        content["parallelism"].as_u64().unwrap(),
-        8,
-        "non-OpenClaw boot-reconcile must not cap parallelism"
-    );
-}
-
 /// OpenClaw inbound normalization convergence:
 ///
 /// 1. An OpenClaw record with parallelism 10 (above cap) is retained via

@@ -27,10 +27,11 @@ fn apply_persona_snapshot_normalizes_openclaw_parallelism() {
     );
 }
 
-/// Persona runtime=None, stale agent_command="openclaw": must NOT cap because
-/// record_agent_command falls back to default (uncapped), not stale openclaw.
+/// Persona runtime=None: must NOT cap regardless of stale agent_command value,
+/// because record_agent_command falls back to the default (uncapped) command.
 #[test]
-fn apply_persona_snapshot_persona_runtime_none_stale_openclaw_not_capped() {
+fn apply_persona_snapshot_persona_runtime_none_is_not_capped() {
+    // stale openclaw
     let mut record = sample_record();
     record.agent_command = "openclaw".to_string();
     record.parallelism = 10;
@@ -43,25 +44,22 @@ fn apply_persona_snapshot_persona_runtime_none_stale_openclaw_not_capped() {
     );
     assert_eq!(
         record.parallelism, 10,
-        "persona runtime=None must not cap via stale agent_command"
+        "persona runtime=None must not cap via stale openclaw agent_command"
     );
-}
 
-/// Same for stale goose: default-command fallback, goose is uncapped anyway.
-#[test]
-fn apply_persona_snapshot_persona_runtime_none_stale_goose_not_capped() {
-    let mut record = sample_record();
-    record.agent_command = "goose".to_string();
-    record.parallelism = 10;
+    // stale goose (same expectation — default-command fallback, goose is uncapped anyway)
+    let mut record2 = sample_record();
+    record2.agent_command = "goose".to_string();
+    record2.parallelism = 10;
     apply_persona_snapshot(
-        &mut record,
+        &mut record2,
         &AgentDefinition {
             runtime: None,
             ..sample_persona()
         },
     );
     assert_eq!(
-        record.parallelism, 10,
+        record2.parallelism, 10,
         "persona runtime=None + stale goose must not cap"
     );
 }

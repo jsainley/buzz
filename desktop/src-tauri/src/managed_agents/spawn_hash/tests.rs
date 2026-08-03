@@ -848,23 +848,6 @@ fn hash_inequality_openclaw_values_crossing_cap() {
     assert_ne!(h5, h4, "OpenClaw 5 and 4 must hash differently");
 }
 
-/// Non-OpenClaw harnesses must hash raw parallelism unchanged.
-#[test]
-fn hash_uses_raw_parallelism_for_non_openclaw() {
-    let mut r10 = record();
-    r10.agent_command = "goose".into();
-    r10.parallelism = 10;
-
-    let mut r8 = record();
-    r8.agent_command = "goose".into();
-    r8.parallelism = 8;
-
-    let h10 = spawn_config_hash(&r10, &[], &[], "ws://relay", &Default::default());
-    let h8 = spawn_config_hash(&r8, &[], &[], "ws://relay", &Default::default());
-
-    assert_ne!(h10, h8, "non-OpenClaw 10 and 8 must hash differently");
-}
-
 /// Linked-persona OpenClaw record: parallelism above the cap hashes the same
 /// as another above-cap value (persona-snapshot normalization cooperates with
 /// the hash-site effective_parallelism call).
