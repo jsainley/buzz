@@ -269,11 +269,11 @@ fn migrate_teams_in_dir_at(
         return Ok(0);
     }
 
-    let content = std::fs::read_to_string(&teams_path)
-        .map_err(|e| format!("failed to read teams.json: {e}"))?;
+    let bytes =
+        std::fs::read(&teams_path).map_err(|e| format!("failed to read teams.json: {e}"))?;
 
-    let records: Vec<TeamRecord> =
-        serde_json::from_str(&content).map_err(|e| format!("failed to parse teams.json: {e}"))?;
+    let records: Vec<TeamRecord> = crate::managed_agents::store_journal::decode_team_store(&bytes)
+        .map_err(|e| format!("failed to parse teams.json: {}", e.message))?;
 
     if records.is_empty() {
         return Ok(0);

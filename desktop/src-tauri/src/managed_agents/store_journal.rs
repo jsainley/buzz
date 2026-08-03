@@ -1,31 +1,23 @@
 //! B1 transactional managed-agents store substrate.
-// The primitives here are the B1 substrate — anchor, lock, journal schema,
-// CAS, tombstone, saga, inbox/outbox, and closure-only mutation API.  Many
-// are not yet called from live code (Phase 2 wires mutate_store into
-// save_managed_agents); suppress dead-code lint for the whole module.
-#![allow(dead_code)]
 //!
-//! `managed-agents.json` and `teams.json` remain the canonical user-visible
-//! files.  A `store-journal.sqlite` lives beside them at the **store-family
-//! anchor** and holds shared recovery facts: operation records, per-key
-//! generation/tombstone metadata, and immutable inbox/outbox rows.
+//! `managed-agents.json` / `teams.json` stay the canonical user-visible files.
+//! `store-journal.sqlite` (beside them, at the **store-family anchor**) holds
+//! shared recovery facts: operation records, per-key generation / tombstone
+//! metadata, immutable inbox/outbox rows.
 //!
 //! **Anchor**: canonical dev `agents/` dir for shared worktrees
-//! (`BUZZ_SHARE_IDENTITY=1`, identifier `xyz.block.buzz.app.dev`); the
-//! bundle's own `agents/` dir for standalone.  Lock identity is never derived
-//! by canonicalizing a possibly-absent `managed-agents.json`.
+//! (`BUZZ_SHARE_IDENTITY=1`); the bundle's own `agents/` dir for standalone.
+//! Lock identity is never derived from a possibly-absent file.
 //!
-//! **Lock sequence**: in-process `AppState::managed_agents_store_lock` mutex
-//! → anchored OS advisory lock (`flock(2)` / named mutex) → fresh decode →
-//! mutation closure → atomic write + journal update → release both.
-//! Network I/O and keyring access stay outside every critical section.
+//! **Lock sequence**: in-process `AppState::managed_agents_store_lock` →
+//! anchored OS advisory lock (`flock`/named-mutex) → fresh decode → mutation
+//! closure → atomic fsync write → release.  Network I/O and keyring access
+//! stay outside every critical section.
 //!
-//! **Posture**: B1 protects data integrity against crashes and concurrent
-//! cooperating processes on one machine.  It does not defend against
-//! adversarial same-user tampering, cross-machine duplication, supply-chain
-//! attack, pre-B1/mixed-version writers bypassing the lock, sign-out/reset
-//! paths that rename state while another process is live, or two desktop
-//! bundles running the same agent pair concurrently.
+//! **Posture**: protects against crashes and concurrent cooperating processes
+//! on one machine only.  Does not defend against adversarial same-user
+//! tampering, cross-machine duplication, supply-chain attack, mixed-version
+//! writers, sign-out/reset races, or concurrent bundles.
 
 use std::{
     path::{Path, PathBuf},
@@ -197,8 +189,8 @@ impl Drop for JournalLockGuard {
 
 // ── Journal database ─────────────────────────────────────────────────────────
 
-/// Open (or create) `store-journal.sqlite` at `anchor_dir`, run schema
-/// migrations, and return the connection (WAL mode, 5 s busy timeout).
+/// Open (or create) `store-journal.sqlite` at `anchor_dir` (WAL mode, 5 s
+/// busy timeout) and apply the schema idempotently.
 pub fn open_journal(anchor_dir: &Path) -> Result<Connection, String> {
     std::fs::create_dir_all(anchor_dir).map_err(|e| format!("create anchor dir: {e}"))?;
     let path = anchor_dir.join(JOURNAL_FILENAME);
@@ -289,6 +281,7 @@ fn apply_journal_schema(conn: &Connection) -> Result<(), String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub u64);
 
+#[allow(dead_code)]
 impl Generation {
     pub fn zero() -> Self {
         Generation(0)
@@ -307,6 +300,7 @@ impl Generation {
 }
 
 /// Outcome of a generation CAS attempt.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasOutcome {
     /// CAS succeeded; `new_generation` is the committed value.
@@ -320,6 +314,7 @@ pub enum CasOutcome {
 
 /// Read the current generation for `key_id`.
 /// Returns `(Generation::zero(), false)` when no row exists.
+#[allow(dead_code)]
 pub fn read_generation(conn: &Connection, key_id: &str) -> Result<(Generation, bool), String> {
     let row: Option<(String, bool)> = conn
         .query_row(
@@ -341,6 +336,7 @@ pub fn read_generation(conn: &Connection, key_id: &str) -> Result<(Generation, b
 /// If `expected` matches the stored generation (or key is absent and
 /// `expected` is zero), advance to `expected.next()` and return
 /// `CasOutcome::Committed`.  Tombstoned keys return `CasOutcome::Tombstoned`.
+#[allow(dead_code)]
 pub fn cas_generation(
     conn: &Connection,
     key_id: &str,
@@ -378,6 +374,7 @@ pub fn cas_generation(
 
 /// Write a tombstone for `key_id` at `expected` generation.
 /// Kept forever; `cas_generation` respects it to prevent ABA.
+#[allow(dead_code)]
 pub fn tombstone_key(
     conn: &Connection,
     key_id: &str,
@@ -429,6 +426,7 @@ pub enum Disposition {
     Accepted,
 }
 
+#[allow(dead_code)]
 impl Disposition {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -473,6 +471,7 @@ impl Disposition {
 
 /// A record from the `operations` table.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OperationRecord {
     pub operation_id: String,
     pub kind: String,
@@ -488,6 +487,7 @@ pub struct OperationRecord {
 }
 
 /// Insert a new `pending` operation record.
+#[allow(dead_code)]
 pub fn insert_operation(
     conn: &Connection,
     operation_id: &str,
@@ -507,6 +507,7 @@ pub fn insert_operation(
 }
 
 /// Read one operation record.  Returns `None` when not found.
+#[allow(dead_code)]
 #[allow(clippy::type_complexity)]
 pub fn read_operation(
     conn: &Connection,
@@ -566,6 +567,7 @@ pub fn read_operation(
 }
 
 /// Advance an operation's disposition (no-op if not found).
+#[allow(dead_code)]
 pub fn advance_disposition(
     conn: &Connection,
     operation_id: &str,
@@ -583,6 +585,7 @@ pub fn advance_disposition(
 
 /// Pin the active compensation event for an operation (v10 claim fence).
 /// Only allowed when disposition is `Pending` (transitioning to `Compensating`).
+#[allow(dead_code)]
 pub fn pin_compensation(
     conn: &Connection,
     operation_id: &str,
@@ -610,6 +613,7 @@ pub fn pin_compensation(
 
 /// Mark that a nonterminal follow-up is required (uncertain/accepted
 /// publication outcome — v12).
+#[allow(dead_code)]
 pub fn set_nonterminal_follow_up(
     conn: &Connection,
     operation_id: &str,
@@ -626,6 +630,7 @@ pub fn set_nonterminal_follow_up(
 }
 
 /// Read all non-terminal operations for recovery.
+#[allow(dead_code)]
 pub fn read_nonterminal_operations(conn: &Connection) -> Result<Vec<OperationRecord>, String> {
     let mut stmt = conn
         .prepare(
@@ -676,6 +681,7 @@ pub fn read_nonterminal_operations(conn: &Connection) -> Result<Vec<OperationRec
 // ── Immutable inbox / outbox rows ─────────────────────────────────────────────
 
 /// Insert an immutable outbox row.  The row is written once and never updated.
+#[allow(dead_code)]
 pub fn insert_outbox_event(
     conn: &Connection,
     event_id: &str,
@@ -694,6 +700,7 @@ pub fn insert_outbox_event(
 }
 
 /// Insert an immutable inbox row.  The row is written once and never updated.
+#[allow(dead_code)]
 pub fn insert_inbox_event(
     conn: &Connection,
     event_id: &str,
@@ -712,6 +719,7 @@ pub fn insert_inbox_event(
 }
 
 /// Read outbox events for `operation_id`.
+#[allow(dead_code)]
 pub fn read_outbox_events(
     conn: &Connection,
     operation_id: &str,
@@ -732,6 +740,7 @@ pub fn read_outbox_events(
 }
 
 /// Read inbox events for `operation_id`.
+#[allow(dead_code)]
 pub fn read_inbox_events(
     conn: &Connection,
     operation_id: &str,
@@ -785,8 +794,8 @@ pub fn decode_team_store(bytes: &[u8]) -> Result<Vec<TeamRecord>, StoreDecodeErr
 
 // ── Atomic write (with fsync) ─────────────────────────────────────────────────
 
-/// Atomically write `payload` to `path` with fsync before rename.
-/// Resolves symlinks first so the rename lands on the physical target.
+/// Write `payload` to `path` atomically (tmp → fsync → rename). Resolves
+/// symlinks so the rename lands on the physical target.
 pub fn atomic_write_with_fsync(path: &Path, payload: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -802,11 +811,8 @@ pub fn atomic_write_with_fsync(path: &Path, payload: &[u8]) -> Result<(), String
         .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), resolved.display()))
 }
 
-/// Atomic write with fsync + owner-only (`0o600`) permissions.
-///
-/// Creates the temp file with `0o600` before writing so the umask window
-/// is closed.  Used for `managed-agents.json`, which may carry plaintext
-/// agent nsecs in the keyringless fallback.
+/// Atomic write (tmp → fsync → rename) with `0o600` permissions. Used for
+/// `managed-agents.json`, which may carry plaintext agent nsecs.
 pub fn atomic_write_restricted_with_fsync(path: &Path, payload: &[u8]) -> Result<(), String> {
     use atomic_write_file::AtomicWriteFile;
     use std::io::Write;
@@ -836,6 +842,7 @@ pub fn atomic_write_restricted_with_fsync(path: &Path, payload: &[u8]) -> Result
 // ── Closure-only mutation API (v7) ────────────────────────────────────────────
 
 /// The decoded state passed to a mutation closure.
+#[allow(dead_code)]
 pub struct StoreState<'a> {
     /// Agent records decoded from `managed-agents.json`.
     pub agents: Vec<ManagedAgentRecord>,
@@ -847,16 +854,10 @@ pub struct StoreState<'a> {
     pub anchor: &'a Path,
 }
 
-/// Perform a mutation against the store under the full lock sequence.
-///
-/// 1. Acquire the in-process `AppState::managed_agents_store_lock`.
-/// 2. Acquire the anchored OS advisory file lock.
-/// 3. Fresh-decode the JSON files and open the journal.
-/// 4. Call `mutation` with a `StoreState` view.
-/// 5. Write back JSON files atomically (with fsync) and commit journal changes.
-/// 6. Release advisory lock, then in-process mutex.
-///
+/// Mutate the store under the full lock sequence (in-process mutex →
+/// advisory lock → fresh decode → mutation → atomic fsync write → release).
 /// Network I/O and keyring access must not occur inside `mutation`.
+#[allow(dead_code)]
 pub fn mutate_store<F, T>(
     app: &AppHandle,
     store_mutex_guard: MutexGuard<'_, ()>,
@@ -919,10 +920,9 @@ where
     Ok(result)
 }
 
-/// Read-only view of the store, under the full lock sequence.
-///
-/// Does not write back JSON files.  Use for reads that must see a
-/// consistent snapshot of the JSON + journal state.
+/// Read-only view of the store under the full lock sequence. Does not
+/// write back JSON files.
+#[allow(dead_code)]
 pub fn read_store<F, T>(
     app: &AppHandle,
     store_mutex_guard: MutexGuard<'_, ()>,
@@ -978,19 +978,10 @@ fn unix_now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Generate a new random UUID v4 as a lowercase hex string without dashes.
+/// Generate a new random UUID v4 operation ID.
+#[allow(dead_code)]
 pub fn new_operation_id() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // Use a combination of time + thread-id for lightweight unique IDs.
-    // In production, callers may substitute uuid::Uuid::new_v4().to_string().
-    let mut h = DefaultHasher::new();
-    unix_now_secs().hash(&mut h);
-    std::thread::current().id().hash(&mut h);
-    let a = h.finish();
-    let mut h2 = DefaultHasher::new();
-    a.hash(&mut h2);
-    "op".to_string() + &format!("{a:016x}{:016x}", h2.finish())
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]

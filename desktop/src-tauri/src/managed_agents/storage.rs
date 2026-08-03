@@ -235,33 +235,44 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
     })
 }
 
-/// Read the raw unified store — keyed instances AND key-less definitions —
-/// with fail-loud parse handling. Internal seam; public readers filter.
-///
-/// Reads from the B1 store-family anchor so dev worktrees see the canonical
-/// shared file when `BUZZ_SHARE_IDENTITY=1`.
-fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
-    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
-    let path = anchor.join("managed-agents.json");
-    if !path.exists() {
+/// Read from `agents_path`. Caller must hold the advisory lock.
+fn load_agent_store_locked(
+    _anchor: &std::path::Path,
+    agents_path: &std::path::Path,
+) -> Result<Vec<ManagedAgentRecord>, String> {
+    if !agents_path.exists() {
         return Ok(Vec::new());
     }
-
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read agent store: {error}"))?;
-    crate::managed_agents::store_journal::decode_agent_store(content.as_bytes()).map_err(|e| {
+    let bytes =
+        fs::read(agents_path).map_err(|error| format!("failed to read agent store: {error}"))?;
+    crate::managed_agents::store_journal::decode_agent_store(&bytes).map_err(|e| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
         // edit. Best-effort file-authoring contract (see managed_agents::
         // reconcile): the broken content survives as `.invalid` for the user
         // to recover, and the parse error propagates instead of being
         // swallowed into an empty store.
-        backup_invalid_store(&path);
+        backup_invalid_store(agents_path);
         format!(
             "failed to parse agent store (preserved as .invalid): {}",
             e.message
         )
     })
+}
+
+/// Read the raw unified store — keyed instances AND key-less definitions —
+/// with fail-loud parse handling. Internal seam; public readers filter.
+///
+/// Acquires the B1 advisory store lock so this call is serialized against
+/// concurrent writers from other processes.  The in-process mutex
+/// (`AppState::managed_agents_store_lock`) is held by callers at the
+/// command level; the OS advisory lock here closes the cross-process gap.
+fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
+    std::fs::create_dir_all(&anchor).map_err(|e| format!("failed to create anchor dir: {e}"))?;
+    let _advisory = crate::managed_agents::store_journal::JournalLockGuard::acquire(&anchor)?;
+    let agents_path = anchor.join("managed-agents.json");
+    load_agent_store_locked(&anchor, &agents_path)
 }
 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
@@ -364,15 +375,15 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
 }
 
 /// Save the keyed agent *instances*, preserving the key-less definitions that
-/// share the unified store: callers pass exactly the records they loaded via
-/// [`load_managed_agents`], and this re-reads the definition half from disk
-/// before the wholesale rewrite so a definition is never dropped by an
-/// instance-side save (and vice versa via [`save_agent_definitions`]).
+/// share the unified store.
+///
+/// Holds the B1 advisory lock for the full read-merge-write sequence:
+/// reads the definition half under lock, merges with the supplied instances,
+/// and writes the unified store atomically.
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
-    let definitions = load_agent_definitions(app).unwrap_or_default();
     let mut sorted = records.to_vec();
     // A caller-supplied key-less record would collide with the definition
-    // half re-read below; instances always carry a pubkey.
+    // half; instances always carry a pubkey.
     sorted.retain(|record| !record.pubkey.is_empty());
     sorted.sort_by(|left, right| {
         left.name
@@ -386,53 +397,77 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     // keyring is unreachable, the key stays inline.
     persist_agent_keys(&mut sorted);
 
-    write_agent_store(app, definitions, sorted)
+    // Acquire advisory lock once for the full read-merge-write sequence so the
+    // definition half is never stale relative to the instance write.
+    write_agent_store_half(app, &sorted, /* keep_instances */ false)
 }
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —
 /// the definition-side mirror of [`save_managed_agents`].
+///
+/// Holds the B1 advisory lock for the full read-merge-write sequence.
 pub(crate) fn save_agent_definitions(
     app: &AppHandle,
     definitions: &[ManagedAgentRecord],
 ) -> Result<(), String> {
-    let mut instances = load_agent_store(app)?;
-    instances.retain(|record| !record.pubkey.is_empty());
-    let mut definitions = definitions.to_vec();
-    definitions.retain(|record| record.pubkey.is_empty());
-    write_agent_store(app, definitions, instances)
+    let mut defs = definitions.to_vec();
+    defs.retain(|record| record.pubkey.is_empty());
+    write_agent_store_half(app, &defs, /* keep_instances */ true)
 }
 
-/// Serialize definitions + instances into the single unified store file.
-/// Definitions sort first (by slug) for stable diffs; instances keep the
-/// name/pubkey order their save path established.
-///
-/// Writes through the B1 store-family anchor so the file lands at the
-/// correct shared dev or standalone path, and uses `atomic_write_restricted_with_fsync`
-/// for crash-safe (fsync + rename) owner-only writes.
-fn write_agent_store(
+/// Write `records` as either the instance or definition half of the unified
+/// store. Acquires the advisory lock, fresh-decodes the complementary half,
+/// merges, and writes atomically so neither half is ever stale.
+fn write_agent_store_half(
     app: &AppHandle,
-    mut definitions: Vec<ManagedAgentRecord>,
-    instances: Vec<ManagedAgentRecord>,
+    records: &[ManagedAgentRecord],
+    keep_instances: bool,
 ) -> Result<(), String> {
-    definitions.sort_by(|left, right| left.slug.cmp(&right.slug));
-    let mut all = definitions;
-    all.extend(instances);
-
-    // Resolve the store-family anchor so the write lands at the canonical
-    // shared path for dev worktrees, or the local bundle path for prod.
     let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
     fs::create_dir_all(&anchor).map_err(|e| format!("failed to create anchor dir: {e}"))?;
-    let path = anchor.join("managed-agents.json");
+
+    // Acquire the interprocess advisory lock.
+    let _advisory = crate::managed_agents::store_journal::JournalLockGuard::acquire(&anchor)?;
+
+    let agents_path = anchor.join("managed-agents.json");
+
+    // Fresh decode under the lock so the complementary half is consistent.
+    let existing = load_agent_store_locked(&anchor, &agents_path).unwrap_or_default();
+
+    let (mut definitions, mut instances): (Vec<_>, Vec<_>) =
+        existing.into_iter().partition(|r| r.pubkey.is_empty());
+
+    if keep_instances {
+        definitions = records
+            .iter()
+            .filter(|r| r.pubkey.is_empty())
+            .cloned()
+            .collect();
+    } else {
+        instances = records
+            .iter()
+            .filter(|r| !r.pubkey.is_empty())
+            .cloned()
+            .collect();
+    }
+
+    definitions.sort_by(|left, right| left.slug.cmp(&right.slug));
+    instances.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.pubkey.cmp(&right.pubkey))
+    });
+
+    let mut all = definitions;
+    all.extend(instances);
 
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
     // `managed-agents.json` carries plaintext agent nsecs in the keyringless
-    // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
-    // keyring-backed case (it is the user's own agent store) and closes the
-    // umask window a post-write `chmod` would leave open. fsync before rename
-    // guarantees the bytes survive a crash mid-write.
-    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(&path, &payload)
+    // fallback — write owner-only with fsync before rename.
+    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(&agents_path, &payload)
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy

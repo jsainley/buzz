@@ -3,14 +3,19 @@ use std::{fs, path::PathBuf};
 use tauri::AppHandle;
 
 use crate::{
-    managed_agents::{managed_agents_base_dir, ManagedAgentRecord, TeamRecord},
+    managed_agents::{ManagedAgentRecord, TeamRecord},
     util::now_iso,
 };
 
 use super::team_repair::team_persona_key;
 
 pub(crate) fn teams_store_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(managed_agents_base_dir(app)?.join("teams.json"))
+    // Resolve through the B1 anchor so dev worktrees use the canonical shared
+    // path and standalone bundles use their own — never derived from a
+    // possibly-absent managed-agents.json.
+    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
+    std::fs::create_dir_all(&anchor).map_err(|e| format!("failed to create anchor dir: {e}"))?;
+    Ok(anchor.join("teams.json"))
 }
 
 fn sort_teams(records: &mut [TeamRecord]) {
@@ -160,10 +165,10 @@ pub(crate) fn load_teams_readonly(path: &std::path::Path) -> Result<Vec<TeamReco
     let now = now_iso();
 
     let records = if path.exists() {
-        let content = fs::read_to_string(path)
-            .map_err(|error| format!("failed to read teams store: {error}"))?;
-        serde_json::from_str::<Vec<TeamRecord>>(&content)
-            .map_err(|error| format!("failed to parse teams store: {error}"))?
+        let bytes =
+            fs::read(path).map_err(|error| format!("failed to read teams store: {error}"))?;
+        crate::managed_agents::store_journal::decode_team_store(&bytes)
+            .map_err(|error| format!("failed to parse teams store: {}", error.message))?
     } else {
         Vec::new()
     };
@@ -177,11 +182,17 @@ pub fn load_teams(app: &AppHandle) -> Result<Vec<TeamRecord>, String> {
     let path = teams_store_path(app)?;
     let now = now_iso();
 
+    // Acquire the interprocess advisory lock before reading (the parent dir
+    // is the B1 anchor — same lock file as the agent-store lock).
+    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
+    std::fs::create_dir_all(&anchor).map_err(|e| format!("failed to create anchor dir: {e}"))?;
+    let _advisory = crate::managed_agents::store_journal::JournalLockGuard::acquire(&anchor)?;
+
     let records = if path.exists() {
-        let content = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read teams store: {error}"))?;
-        serde_json::from_str::<Vec<TeamRecord>>(&content)
-            .map_err(|error| format!("failed to parse teams store: {error}"))?
+        let bytes =
+            fs::read(&path).map_err(|error| format!("failed to read teams store: {error}"))?;
+        crate::managed_agents::store_journal::decode_team_store(&bytes)
+            .map_err(|error| format!("failed to parse teams store: {}", error.message))?
     } else {
         Vec::new()
     };
@@ -190,20 +201,34 @@ pub fn load_teams(app: &AppHandle) -> Result<Vec<TeamRecord>, String> {
     sort_teams(&mut records);
 
     if changed || !path.exists() {
-        save_teams(app, &records)?;
+        // Advisory lock already held; call the inner write helper directly
+        // to avoid a double-lock on the same fd.
+        save_teams_locked(&path, &records)?;
     }
 
     Ok(records)
 }
 
-pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String> {
+/// Write `records` to `path` using the fail-closed atomic fsync write.
+/// Called from `load_teams` (already holds the advisory lock) and
+/// `save_teams` (acquires it before calling here).
+fn save_teams_locked(path: &std::path::Path, records: &[TeamRecord]) -> Result<(), String> {
     let mut sorted = records.to_vec();
     sort_teams(&mut sorted);
-
-    let path = teams_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize teams store: {error}"))?;
-    crate::managed_agents::store_journal::atomic_write_with_fsync(&path, &payload)
+    crate::managed_agents::store_journal::atomic_write_with_fsync(path, &payload)
+}
+
+pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String> {
+    let path = teams_store_path(app)?;
+
+    // Acquire the interprocess advisory lock before writing.
+    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
+    std::fs::create_dir_all(&anchor).map_err(|e| format!("failed to create anchor dir: {e}"))?;
+    let _advisory = crate::managed_agents::store_journal::JournalLockGuard::acquire(&anchor)?;
+
+    save_teams_locked(&path, records)
 }
 
 /// Names of managed agents that still reference `team` — either via the
