@@ -1,0 +1,72 @@
+name: Build Tauri Desktop (Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build'
+        required: true
+        default: 'feat/remote-agents'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      
+      - uses: pnpm/action-setup@v3
+        with:
+          version: '10.34.5'
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'pnpm-lock.yaml'
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev cmake
+      
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: ./desktop
+      
+      - name: Build Tauri app
+        run: pnpm build
+        working-directory: ./desktop
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buzz-desktop-linux
+          path: desktop/src-tauri/target/release/buzz-desktop
+          retention-days: 7
+          
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: desktop-linux-${{ github.run_number }}
+          release_name: "Buzz Desktop Linux Build #${{ github.run_number }}"
+          body: "Automated Tauri Linux build"
+          draft: false
+          prerelease: true
+      
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: desktop/src-tauri/target/release/buzz-desktop
+          asset_name: buzz-desktop
+          asset_content_type: application/octet-stream
