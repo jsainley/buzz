@@ -538,6 +538,7 @@ fn deploy_payload_openclaw_parallelism_is_capped() {
         None,
         None,
         std::collections::BTreeMap::new(),
+        serde_json::Value::Null,
     );
 
     assert_eq!(
@@ -613,6 +614,7 @@ fn deploy_payload_uses_pinned_agent_command_not_live_descriptor() {
         None,
         None,
         std::collections::BTreeMap::new(),
+        serde_json::Value::Null,
     );
     assert_eq!(
         payload["agent_command"], "openclaw",
