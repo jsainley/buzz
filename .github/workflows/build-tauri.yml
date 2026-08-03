@@ -1,0 +1,77 @@
+name: Build Tauri Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build'
+        required: true
+        default: 'feat/remote-agents'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          repository: troyhoffman-oss/buzz
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      
+      - uses: pnpm/action-setup@v3
+        with:
+          version: '10.34.5'
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: 'pnpm-lock.yaml'
+      
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: ./desktop
+      
+      - name: Build Tauri app
+        run: pnpm build
+        working-directory: ./desktop
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buzz-desktop-windows
+          path: desktop/src-tauri/target/release/buzz-desktop.exe
+          retention-days: 7
+  
+  create-release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: buzz-desktop-windows
+      
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: desktop-${{ github.run_number }}
+          release_name: "Buzz Desktop Build #${{ github.run_number }}"
+          body: "Automated Tauri build"
+          draft: false
+          prerelease: true
+      
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./buzz-desktop.exe
+          asset_name: buzz-desktop.exe
+          asset_content_type: application/octet-stream
