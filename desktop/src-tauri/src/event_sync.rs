@@ -125,9 +125,10 @@ fn migrate_personas_in_dir_at(
             }
             let content = std::fs::read_to_string(&agents_path)
                 .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
+            // Fail-closed codec: unknown/malformed content ⇒ error, zero mutation.
             let all: Vec<crate::managed_agents::ManagedAgentRecord> =
-                serde_json::from_str(&content)
-                    .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?;
+                crate::managed_agents::store_journal::decode_agent_store(content.as_bytes())
+                    .map_err(|e| e.message)?;
             all.iter()
                 .filter(|record| record.pubkey.is_empty())
                 .filter_map(|record| record.to_definition_view())

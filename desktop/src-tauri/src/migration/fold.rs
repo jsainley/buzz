@@ -50,8 +50,9 @@ fn fold_personas_in_dir(base_dir: &Path) -> Result<Option<usize>, String> {
     let mut all: Vec<crate::managed_agents::ManagedAgentRecord> = if agents_path.exists() {
         let content = std::fs::read_to_string(&agents_path)
             .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?
+        // Fail-closed codec: unknown/malformed content ⇒ error, zero mutation.
+        crate::managed_agents::store_journal::decode_agent_store(content.as_bytes())
+            .map_err(|e| e.message)?
     } else {
         Vec::new()
     };
@@ -74,7 +75,10 @@ fn fold_personas_in_dir(base_dir: &Path) -> Result<Option<usize>, String> {
 
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|e| format!("failed to serialize unified store: {e}"))?;
-    crate::managed_agents::atomic_write_json_restricted(&agents_path, &payload)?;
+    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+        &agents_path,
+        &payload,
+    )?;
 
     // Rename only after the unified store write succeeded — a crash between
     // the two leaves personas.json in place and the fold re-runs idempotently

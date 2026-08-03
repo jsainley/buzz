@@ -71,8 +71,10 @@ pub(super) fn strip_baked_team_instructions_in_dir(base_dir: &Path) -> Result<us
     }
     let content = std::fs::read_to_string(&agents_path)
         .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
-    let mut all: Vec<ManagedAgentRecord> = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?;
+    // Fail-closed codec: unknown/malformed content ⇒ error, zero mutation.
+    let mut all: Vec<ManagedAgentRecord> =
+        crate::managed_agents::store_journal::decode_agent_store(content.as_bytes())
+            .map_err(|e| format!("failed to parse managed-agents.json: {}", e.message))?;
 
     // Definition hashes BEFORE the strip: stripping a definition's
     // `system_prompt` changes its `persona_content_hash`, which is the drift
@@ -125,7 +127,10 @@ pub(super) fn strip_baked_team_instructions_in_dir(base_dir: &Path) -> Result<us
 
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|e| format!("failed to serialize managed-agents.json: {e}"))?;
-    crate::managed_agents::atomic_write_json_restricted(&agents_path, &payload)?;
+    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+        &agents_path,
+        &payload,
+    )?;
     Ok(stripped)
 }
 

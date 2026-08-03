@@ -646,7 +646,14 @@ pub async fn confirm_team_snapshot_import(
         // Distinguish "file exists with content" from "file absent" so rollback
         // can delete a file created by the import rather than leaving orphaned
         // records.
-        let agents_store_path = crate::managed_agents::storage::managed_agents_store_path(&app)?;
+        //
+        // Use the store-family anchor so the snapshot/restore targets the same
+        // file that load/save_managed_agents operate on (canonical dev path for
+        // shared worktrees, bundle path for standalone).
+        let agents_store_path = {
+            let anchor = crate::managed_agents::store_journal::store_anchor_dir(&app)?;
+            anchor.join("managed-agents.json")
+        };
         let agents_store_snapshot = match std::fs::read(&agents_store_path) {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -680,10 +687,12 @@ pub async fn confirm_team_snapshot_import(
             }
             // Restore agent store file.
             let restore = match &agents_store_snapshot {
-                Some(bytes) => crate::managed_agents::storage::atomic_write_json_restricted(
-                    &agents_store_path,
-                    bytes,
-                ),
+                Some(bytes) => {
+                    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+                        &agents_store_path,
+                        bytes,
+                    )
+                }
                 None => match std::fs::remove_file(&agents_store_path) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                     other => other.map_err(|e| e.to_string()),
@@ -725,9 +734,10 @@ pub async fn confirm_team_snapshot_import(
             let err = rollback_agents(e);
             // Also restore teams store.
             let teams_restore = match &teams_store_snapshot {
-                Some(bytes) => {
-                    crate::managed_agents::storage::atomic_write_json(&teams_store_path, bytes)
-                }
+                Some(bytes) => crate::managed_agents::store_journal::atomic_write_with_fsync(
+                    &teams_store_path,
+                    bytes,
+                ),
                 None => match std::fs::remove_file(&teams_store_path) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                     other => other.map_err(|e| e.to_string()),

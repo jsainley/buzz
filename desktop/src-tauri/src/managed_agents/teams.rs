@@ -203,7 +203,7 @@ pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String>
     let path = teams_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize teams store: {error}"))?;
-    crate::managed_agents::storage::atomic_write_json(&path, &payload)
+    crate::managed_agents::store_journal::atomic_write_with_fsync(&path, &payload)
 }
 
 /// Names of managed agents that still reference `team` — either via the

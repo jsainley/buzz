@@ -42,6 +42,7 @@ pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+#[allow(dead_code)]
 pub(crate) fn managed_agents_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("managed-agents.json"))
 }
@@ -236,15 +237,19 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
+///
+/// Reads from the B1 store-family anchor so dev worktrees see the canonical
+/// shared file when `BUZZ_SHARE_IDENTITY=1`.
 fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
-    let path = managed_agents_store_path(app)?;
+    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
+    let path = anchor.join("managed-agents.json");
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read agent store: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| {
+    crate::managed_agents::store_journal::decode_agent_store(content.as_bytes()).map_err(|e| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
         // edit. Best-effort file-authoring contract (see managed_agents::
@@ -252,7 +257,10 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
         // to recover, and the parse error propagates instead of being
         // swallowed into an empty store.
         backup_invalid_store(&path);
-        format!("failed to parse agent store (preserved as .invalid): {error}")
+        format!(
+            "failed to parse agent store (preserved as .invalid): {}",
+            e.message
+        )
     })
 }
 
@@ -397,6 +405,10 @@ pub(crate) fn save_agent_definitions(
 /// Serialize definitions + instances into the single unified store file.
 /// Definitions sort first (by slug) for stable diffs; instances keep the
 /// name/pubkey order their save path established.
+///
+/// Writes through the B1 store-family anchor so the file lands at the
+/// correct shared dev or standalone path, and uses `atomic_write_restricted_with_fsync`
+/// for crash-safe (fsync + rename) owner-only writes.
 fn write_agent_store(
     app: &AppHandle,
     mut definitions: Vec<ManagedAgentRecord>,
@@ -406,15 +418,21 @@ fn write_agent_store(
     let mut all = definitions;
     all.extend(instances);
 
-    let path = managed_agents_store_path(app)?;
+    // Resolve the store-family anchor so the write lands at the canonical
+    // shared path for dev worktrees, or the local bundle path for prod.
+    let anchor = crate::managed_agents::store_journal::store_anchor_dir(app)?;
+    fs::create_dir_all(&anchor).map_err(|e| format!("failed to create anchor dir: {e}"))?;
+    let path = anchor.join("managed-agents.json");
+
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
     // `managed-agents.json` carries plaintext agent nsecs in the keyringless
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
-    // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    // umask window a post-write `chmod` would leave open. fsync before rename
+    // guarantees the bytes survive a crash mid-write.
+    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(&path, &payload)
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy
@@ -595,13 +613,25 @@ pub fn delete_agent_key(pubkey: &str) {
     }
 }
 
-/// Atomic, symlink-preserving JSON write.
+/// Atomic, symlink-preserving JSON write with fsync before rename.
 /// Resolves symlinks so the tmp+rename happens at the real target path,
 /// preserving any symlink at `path`.
+///
+/// Sequence: write tmp → fsync → rename over target.  The fsync ensures the
+/// bytes survive a crash between the write and the rename; without it a torn
+/// write could leave a zero-length or truncated file on the target path.
+#[allow(dead_code)]
 pub(crate) fn atomic_write_json(path: &Path, payload: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let tmp = resolved.with_extension("json.tmp");
-    std::fs::write(&tmp, payload).map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+    let mut file =
+        std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    file.write_all(payload)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
+    drop(file);
     std::fs::rename(&tmp, &resolved)
         .map_err(|e| format!("failed to rename {}: {e}", resolved.display()))
 }

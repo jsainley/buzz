@@ -483,12 +483,8 @@ fn copy_file_over_generated_default(src: &Path, dst: &Path) -> std::io::Result<(
 }
 
 /// Read a JSON array of objects from `path`, apply `f` to each object,
-/// and write back if any mutation returned `true`.
-///
-/// Writes back via [`crate::managed_agents::atomic_write_json_restricted`]
-/// (owner-only `0o600`): the store files this rewrites can carry plaintext
-/// agent nsecs on a keyringless host, so the write must not reopen the umask
-/// window SECURITY.md:90 closes.
+/// and write back with `atomic_write_restricted_with_fsync` if any mutation
+/// returned `true`.
 fn patch_json_records(
     path: &Path,
     mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> bool,
@@ -511,7 +507,9 @@ fn patch_json_records(
     }
     if changed {
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
+            if let Err(e) = crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+                path, &bytes,
+            ) {
                 eprintln!("buzz-desktop: patch-json-records: {e}");
             }
         }
@@ -560,10 +558,10 @@ struct LegacyAvatarMatch<'a> {
 /// idempotent and avoids relying on timestamps or other persona fields the
 /// user may also have edited.
 fn refresh_builtin_agent_avatars(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_data_dir() else {
+    let Ok(anchor) = crate::managed_agents::store_journal::store_anchor_dir(app) else {
         return;
     };
-    let path = dir.join("agents/managed-agents.json");
+    let path = anchor.join("managed-agents.json");
     if path.exists() {
         refresh_builtin_agent_avatars_in_file(
             &path,
@@ -662,7 +660,9 @@ fn refresh_builtin_agent_avatars_in_file(
 
     if changed {
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
+            if let Err(e) = crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+                path, &bytes,
+            ) {
                 eprintln!("buzz-desktop: refresh-builtin-agent-avatars: {e}");
             }
         }

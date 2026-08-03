@@ -55,8 +55,10 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
     }
     let content = std::fs::read_to_string(&agents_path)
         .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
-    let mut all: Vec<ManagedAgentRecord> = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?;
+    // Fail-closed codec: unknown/malformed content ⇒ error, zero mutation.
+    let mut all: Vec<ManagedAgentRecord> =
+        crate::managed_agents::store_journal::decode_agent_store(content.as_bytes())
+            .map_err(|e| e.message)?;
 
     let needs_backfill =
         |record: &ManagedAgentRecord| !record.pubkey.is_empty() && record.persona_id.is_none();
@@ -131,7 +133,10 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
     all.extend(manufactured);
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|e| format!("failed to serialize unified store: {e}"))?;
-    crate::managed_agents::atomic_write_json_restricted(&agents_path, &payload)?;
+    crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+        &agents_path,
+        &payload,
+    )?;
     Ok(backfilled)
 }
 

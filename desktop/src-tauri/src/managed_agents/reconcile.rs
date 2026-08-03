@@ -83,10 +83,17 @@ fn reconcile_agents_in_dir_at(
     let content = std::fs::read_to_string(&store_path)
         .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
 
-    let records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|e| {
-        super::storage::backup_invalid_store(&store_path);
-        format!("failed to parse managed-agents.json (preserved as .invalid): {e}")
-    })?;
+    // Fail-closed codec: unknown/malformed content ⇒ error, zero mutation.
+    let records: Vec<ManagedAgentRecord> =
+        crate::managed_agents::store_journal::decode_agent_store(content.as_bytes()).map_err(
+            |e| {
+                super::storage::backup_invalid_store(&store_path);
+                format!(
+                    "failed to parse managed-agents.json (preserved as .invalid): {}",
+                    e.message
+                )
+            },
+        )?;
 
     if records.is_empty() {
         return Ok(0);

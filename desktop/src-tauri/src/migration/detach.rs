@@ -80,8 +80,10 @@ pub(super) fn detach_directory_backed_teams_in_dir(base_dir: &Path) -> Result<us
     if agents_path.exists() {
         let agents_content = std::fs::read_to_string(&agents_path)
             .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
-        let mut agents: Vec<ManagedAgentRecord> = serde_json::from_str(&agents_content)
-            .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?;
+        // Fail-closed codec: unknown/malformed content ⇒ error, zero mutation.
+        let mut agents: Vec<ManagedAgentRecord> =
+            crate::managed_agents::store_journal::decode_agent_store(agents_content.as_bytes())
+                .map_err(|e| e.message)?;
 
         let mut agents_changed = false;
         for agent in agents.iter_mut() {
@@ -109,7 +111,10 @@ pub(super) fn detach_directory_backed_teams_in_dir(base_dir: &Path) -> Result<us
         if agents_changed {
             let payload = serde_json::to_vec_pretty(&agents)
                 .map_err(|e| format!("failed to serialize managed-agents.json: {e}"))?;
-            crate::managed_agents::atomic_write_json_restricted(&agents_path, &payload)?;
+            crate::managed_agents::store_journal::atomic_write_restricted_with_fsync(
+                &agents_path,
+                &payload,
+            )?;
         }
     }
 
@@ -154,7 +159,7 @@ pub(super) fn detach_directory_backed_teams_in_dir(base_dir: &Path) -> Result<us
 
     let payload = serde_json::to_vec_pretty(&teams)
         .map_err(|e| format!("failed to serialize teams.json: {e}"))?;
-    crate::managed_agents::atomic_write_json(&teams_path, &payload)?;
+    crate::managed_agents::store_journal::atomic_write_with_fsync(&teams_path, &payload)?;
 
     Ok(detached)
 }
