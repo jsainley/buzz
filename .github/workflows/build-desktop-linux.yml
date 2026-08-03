@@ -29,8 +29,8 @@ jobs:
         run: pnpm install
         working-directory: desktop
       
-      - name: Build desktop
-        run: pnpm build
+      - name: Build Tauri desktop binary
+        run: pnpm tauri build
         working-directory: desktop
       
       - name: Upload binary
