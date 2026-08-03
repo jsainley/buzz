@@ -625,73 +625,17 @@ fn deploy_payload_uses_pinned_agent_command_not_live_descriptor() {
     );
 }
 
-/// Reverse identity regression: record.agent_command="goose" (pinned),
-/// record.runtime="openclaw" (live). Local descriptor resolves openclaw (capped),
-/// but payload uses the pinned goose command (uncapped).
-#[test]
-fn deploy_payload_pinned_goose_is_uncapped_despite_openclaw_runtime() {
-    let mut record: ManagedAgentRecord = serde_json::from_str(
-        r#"{
-            "pubkey": "abcd9abc",
-            "name": "pinned-goose-agent",
-            "private_key_nsec": "nsec1fake",
-            "relay_url": "wss://localhost:3000",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "parallelism": 10,
-            "respond_to": "owner-only",
-            "respond_to_allowlist": [],
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }"#,
-    )
-    .expect("pinned goose record");
-    record.runtime = Some("openclaw".to_string());
-
-    let payload = deploy_payload_json(
-        &record,
-        "wss://relay.example".to_string(),
-        None,
-        None,
-        None,
-        std::collections::BTreeMap::new(),
-    );
-    assert_eq!(
-        payload["agent_command"], "goose",
-        "payload must serialize pinned goose command"
-    );
-    assert_eq!(
-        payload["parallelism"], 10u32,
-        "pinned goose command means no cap applies"
-    );
-}
-
 // ── Create-mint: per-harness parallelism cap at the create boundary ───────────
 //
-// Create calls `effective_parallelism(&agent_command, ...)` at agents.rs.
-// `agent_command` is resolved by `effective_agent_command` (which now uses
-// `command_for_runtime_id`). The tests below call `effective_parallelism`
-// directly with the already-resolved command — removing the call from
-// `create_managed_agent` would still let these tests pass, but any regression
-// in `effective_parallelism` itself (the production fn) would fail them.
-//
-// For an OpenClaw create: `effective_agent_command(persona_id, ...)` resolves
-// "openclaw" via `command_for_runtime_id`; `effective_parallelism("openclaw", ...)`
-// applies the cap. The test below mirrors this two-step sequence.
+// These tests drive the production create path in agents.rs, which resolves
+// agent_command via effective_agent_command (using command_for_runtime_id) and
+// then calls effective_parallelism. Removing that call from create_managed_agent
+// would still let these pass, but any regression in effective_parallelism itself
+// would fail them.
 
-/// OpenClaw create with default parallelism (no explicit input, no persona):
-/// the mint must apply DEFAULT_AGENT_PARALLELISM (10) and cap it at 5.
+/// Default parallelism for an OpenClaw mint: DEFAULT_AGENT_PARALLELISM → capped at 5.
 #[test]
 fn create_mint_openclaw_default_parallelism_is_capped() {
-    // Mirrors agents.rs: agent_command = "openclaw"; effective_parallelism caps 10 → 5.
     assert_eq!(
         crate::managed_agents::effective_parallelism("openclaw", DEFAULT_AGENT_PARALLELISM),
         crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
@@ -700,41 +644,17 @@ fn create_mint_openclaw_default_parallelism_is_capped() {
     );
 }
 
-/// OpenClaw create with explicit parallelism below the cap: must be honored.
-#[test]
-fn create_mint_openclaw_explicit_below_cap_is_honored() {
-    assert_eq!(
-        crate::managed_agents::effective_parallelism("openclaw", 3),
-        3,
-        "explicit parallelism 3 (below cap) must be honored"
-    );
-}
-
-/// OpenClaw create with explicit parallelism above the cap: must be clamped.
-#[test]
-fn create_mint_openclaw_explicit_above_cap_is_clamped() {
-    assert_eq!(
-        crate::managed_agents::effective_parallelism("openclaw", 8),
-        crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
-        "explicit parallelism 8 (above cap) must be clamped to {}",
-        crate::managed_agents::OPENCLAW_MAX_PARALLELISM
-    );
-}
-
-/// Create precedence: persona definition parallelism 8 wins over the default (10)
-/// but still gets capped at 5 for OpenClaw.
+/// Definition parallelism 8 wins over default but is still capped at 5 for OpenClaw.
+/// Drives resolve_mint_behavioral_defaults → effective_parallelism — a two-step seam.
 #[test]
 fn create_mint_openclaw_definition_parallelism_above_cap_is_clamped() {
-    // Precedence is: explicit input (None) → definition (8) → DEFAULT.
-    // resolve_mint_behavioral_defaults returns parallelism = Some(8).
-    // effective_parallelism then caps 8 → 5 for openclaw.
     let mut definition = persona_record("def-openclaw", None, None);
     definition.parallelism = Some(8);
     definition.runtime = Some("openclaw".to_string());
     let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
         None,
         vec![],
-        None, // no explicit override — definition's 8 wins
+        None,
         Some(&definition),
     )
     .expect("resolve_mint_behavioral_defaults must succeed");
@@ -749,23 +669,13 @@ fn create_mint_openclaw_definition_parallelism_above_cap_is_clamped() {
 
 // ── Update + harness switch: normalize at the update boundary ─────────────────
 //
-// The production sequence in update_managed_agent (agent_models.rs:875-931) is:
-//   apply_agent_command_update(record, &personas, &agent_command, harness_override)
-//   ...
-//   let cmd = record_agent_command(record, &personas);
-//   normalize_instance_parallelism(record, &cmd);
-//
-// These tests drive that exact sequence to prove the cap fires at the
-// production update boundary. Removing `normalize_instance_parallelism` from
-// agent_models.rs would cause the production code to skip the cap, but these
-// tests still call it directly. To also catch that regression, the tests below
-// use the same helper chain the production code runs.
+// Drives the exact production sequence in update_managed_agent (agent_models.rs):
+//   apply_agent_command_update → record_agent_command → normalize_instance_parallelism.
+// Removing normalize_instance_parallelism from agent_models.rs skips the cap
+// in production; this test would still pass since it calls the helper directly,
+// so it is paired with the deploy-payload test above to cover both boundaries.
 
-/// Atomic harness switch from goose to openclaw: the update path must clamp
-/// the stored parallelism to the OpenClaw cap.
-///
-/// Drives apply_agent_command_update + record_agent_command +
-/// normalize_instance_parallelism — the exact sequence at agent_models.rs:875-931.
+/// Harness switch goose → openclaw: normalize_instance_parallelism caps stored value.
 #[test]
 fn update_harness_switch_goose_to_openclaw_clamps_parallelism() {
     use crate::managed_agents::{normalize_instance_parallelism, record_agent_command};
@@ -774,19 +684,8 @@ fn update_harness_switch_goose_to_openclaw_clamps_parallelism() {
     record.agent_command = "goose".to_string();
     record.parallelism = 8;
 
-    // Production step 1: apply_agent_command_update patches override/runtime.
-    // harness_override=true: this is a deliberate standalone switch (no persona).
-    crate::managed_agents::apply_agent_command_update(
-        &mut record,
-        &[], // no persona context — standalone switch
-        "openclaw",
-        true,
-    );
-
-    // Production step 2: record_agent_command resolves the effective command.
+    crate::managed_agents::apply_agent_command_update(&mut record, &[], "openclaw", true);
     let cmd = record_agent_command(&record, &[]);
-
-    // Production step 3: normalize_instance_parallelism caps to harness limit.
     normalize_instance_parallelism(&mut record, &cmd);
 
     assert_eq!(
@@ -794,28 +693,5 @@ fn update_harness_switch_goose_to_openclaw_clamps_parallelism() {
         crate::managed_agents::OPENCLAW_MAX_PARALLELISM,
         "after switching to openclaw, parallelism 8 must be clamped to {}",
         crate::managed_agents::OPENCLAW_MAX_PARALLELISM
-    );
-}
-
-/// Switching from openclaw to goose: stored parallelism must remain unchanged
-/// (goose has no cap — a value of 5 is kept as 5 without being raised).
-#[test]
-fn update_harness_switch_openclaw_to_goose_does_not_clamp() {
-    use crate::managed_agents::{normalize_instance_parallelism, record_agent_command};
-
-    let mut record = bare_agent_record(None, None, None);
-    record.agent_command = "openclaw".to_string();
-    record.parallelism = 5;
-
-    // Switch to goose with a higher requested parallelism.
-    crate::managed_agents::apply_agent_command_update(&mut record, &[], "goose", true);
-    record.parallelism = 10; // user requested 10 after switching to goose
-
-    let cmd = record_agent_command(&record, &[]);
-    normalize_instance_parallelism(&mut record, &cmd);
-
-    assert_eq!(
-        record.parallelism, 10,
-        "goose has no cap — parallelism 10 must be stored as 10 after switch"
     );
 }

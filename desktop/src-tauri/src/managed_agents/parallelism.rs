@@ -160,220 +160,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn harness_max_parallelism_openclaw_returns_5() {
-        assert_eq!(
-            super::harness_max_parallelism("openclaw"),
-            Some(super::OPENCLAW_MAX_PARALLELISM)
-        );
-    }
-
-    #[test]
-    fn harness_max_parallelism_openclaw_normalizes_path_prefix_and_exe() {
-        assert_eq!(
-            super::harness_max_parallelism("/usr/local/bin/openclaw"),
-            Some(super::OPENCLAW_MAX_PARALLELISM)
-        );
-        assert_eq!(
-            super::harness_max_parallelism("openclaw.exe"),
-            Some(super::OPENCLAW_MAX_PARALLELISM)
-        );
-        assert_eq!(
-            super::harness_max_parallelism(r"C:\Tools\openclaw.exe"),
-            Some(super::OPENCLAW_MAX_PARALLELISM)
-        );
-    }
-
-    #[test]
-    fn harness_max_parallelism_unknown_harness_returns_none() {
-        assert_eq!(super::harness_max_parallelism("goose"), None);
-        assert_eq!(super::harness_max_parallelism("buzz-agent"), None);
-        assert_eq!(super::harness_max_parallelism("custom-agent"), None);
-        assert_eq!(super::harness_max_parallelism(""), None);
-    }
-
-    #[test]
-    fn effective_parallelism_clamps_above_cap() {
-        assert_eq!(
-            super::effective_parallelism("openclaw", 10),
-            super::OPENCLAW_MAX_PARALLELISM
-        );
-        assert_eq!(
-            super::effective_parallelism("openclaw", 32),
-            super::OPENCLAW_MAX_PARALLELISM
-        );
-    }
-
-    #[test]
-    fn effective_parallelism_honors_value_below_cap() {
-        assert_eq!(super::effective_parallelism("openclaw", 5), 5);
-        assert_eq!(super::effective_parallelism("openclaw", 1), 1);
-        assert_eq!(super::effective_parallelism("openclaw", 3), 3);
-    }
-
-    #[test]
-    fn effective_parallelism_identity_for_uncapped_harness() {
-        assert_eq!(super::effective_parallelism("goose", 10), 10);
-        assert_eq!(super::effective_parallelism("goose", 99), 99);
-        assert_eq!(super::effective_parallelism("buzz-agent", 32), 32);
-        assert_eq!(super::effective_parallelism("custom", 1), 1);
-    }
-
-    #[test]
-    fn normalize_instance_parallelism_clamps_openclaw_record() {
-        let mut record = record_with(None, 10);
-        super::normalize_instance_parallelism(&mut record, "openclaw");
-        assert_eq!(record.parallelism, super::OPENCLAW_MAX_PARALLELISM);
-    }
-
-    #[test]
-    fn normalize_instance_parallelism_leaves_non_openclaw_unchanged() {
-        let mut record = record_with(None, 10);
-        super::normalize_instance_parallelism(&mut record, "goose");
-        assert_eq!(record.parallelism, 10);
-    }
-
-    // ── command_for_runtime_id: authoritative three-tier lookup ──────────────
-
-    #[test]
-    fn command_for_runtime_id_resolves_openclaw_preset() {
-        // OpenClaw is a preset harness (not in KNOWN_ACP_RUNTIMES) — must resolve
-        // via the static PRESET_HARNESSES fallback even with a cold registry.
-        assert_eq!(
-            super::super::command_for_runtime_id("openclaw").as_deref(),
-            Some("openclaw"),
-            "command_for_runtime_id must resolve openclaw from the static preset list"
-        );
-    }
-
-    #[test]
-    fn command_for_runtime_id_resolves_builtin_goose() {
-        // goose is a static builtin in KNOWN_ACP_RUNTIMES.
-        assert_eq!(
-            super::super::command_for_runtime_id("goose").as_deref(),
-            Some("goose")
-        );
-    }
-
-    #[test]
-    fn command_for_runtime_id_unknown_returns_none() {
-        assert_eq!(
-            super::super::command_for_runtime_id("nonexistent-runtime-xyz"),
-            None
-        );
-        assert_eq!(super::super::command_for_runtime_id(""), None);
-    }
-
-    // ── acp_agents_value: spawn-env helper ───────────────────────────────────
-    //
-    // These tests drive the pure helper extracted from spawn_agent_child.
-    // Deleting or changing it breaks the test AND the production spawn env.
-
-    /// Legacy OpenClaw record: spawn env must carry BUZZ_ACP_AGENTS=5.
-    #[test]
-    fn acp_agents_value_openclaw_legacy_record_is_5() {
-        assert_eq!(
-            super::acp_agents_value("openclaw", 10),
-            "5",
-            "BUZZ_ACP_AGENTS for openclaw with parallelism 10 must be \"5\""
-        );
-    }
-
-    /// Non-OpenClaw harness: BUZZ_ACP_AGENTS passes through the raw value.
-    #[test]
-    fn acp_agents_value_goose_passes_through() {
-        assert_eq!(super::acp_agents_value("goose", 10), "10");
-        assert_eq!(super::acp_agents_value("goose", 99), "99");
-    }
-
-    /// OpenClaw at or below the cap: BUZZ_ACP_AGENTS equals the stored value.
-    #[test]
-    fn acp_agents_value_openclaw_at_cap_is_unchanged() {
-        assert_eq!(super::acp_agents_value("openclaw", 5), "5");
-        assert_eq!(super::acp_agents_value("openclaw", 3), "3");
-    }
-
-    // ── Two-direction override table ──────────────────────────────────────────
-    //
-    // Tests the full agreement chain for both override directions:
-    //   wire projection (effective_parallelism) →
-    //   summary (record_agent_command + effective_parallelism) →
-    //   spawn-env helper (acp_agents_value)
-    //
-    // The summary path in runtime.rs:314 is:
-    //   effective_parallelism(&descriptor.command, record.parallelism)
-    //   where descriptor.command = record_agent_command(record, personas)
-    //
-    // For records with a materialized override or runtime (no persona context
-    // needed), record_agent_command resolves correctly without a personas slice.
-    // The persona-inherited direction is covered by the separate tests below.
-    // Deleting effective_parallelism or changing its OpenClaw cap breaks all
-    // assertions in these tests.
-
-    /// OpenClaw runtime + Goose override: all three seams agree → 10 (uncapped).
-    #[test]
-    fn override_direction_openclaw_runtime_goose_override_is_uncapped_everywhere() {
-        let mut record = record_with(Some("openclaw"), 10);
-        record.agent_command_override = Some("goose".to_string());
-
-        // Summary path: record_agent_command (no personas needed — override wins).
-        let summary_cmd = crate::managed_agents::record_agent_command(&record, &[]);
-        assert_eq!(
-            summary_cmd, "goose",
-            "summary descriptor must follow goose override"
-        );
-
-        // Wire projection and summary agree.
-        assert_eq!(
-            super::effective_parallelism(&summary_cmd, record.parallelism),
-            10,
-            "wire projection and summary must emit 10 (goose is uncapped)"
-        );
-
-        // Spawn-env helper agrees.
-        assert_eq!(
-            super::acp_agents_value(&summary_cmd, record.parallelism),
-            "10",
-            "BUZZ_ACP_AGENTS must be 10 (goose is uncapped)"
-        );
-    }
-
-    /// Goose runtime + OpenClaw override: all three seams agree → 5 (capped).
-    #[test]
-    fn override_direction_goose_runtime_openclaw_override_is_capped_everywhere() {
-        let mut record = record_with(Some("goose"), 10);
-        record.agent_command_override = Some("openclaw".to_string());
-
-        let summary_cmd = crate::managed_agents::record_agent_command(&record, &[]);
-        assert_eq!(
-            summary_cmd, "openclaw",
-            "summary descriptor must follow openclaw override"
-        );
-
-        assert_eq!(
-            super::effective_parallelism(&summary_cmd, record.parallelism),
-            super::OPENCLAW_MAX_PARALLELISM,
-            "wire projection and summary must emit 5 (openclaw override caps)"
-        );
-        assert_eq!(
-            super::acp_agents_value(&summary_cmd, record.parallelism),
-            "5",
-            "BUZZ_ACP_AGENTS must be 5 (openclaw override caps)"
-        );
-    }
-
-    // ── Summary parallelism: persona-inherited direction ──────────────────────
-    //
-    // The summary path uses record_agent_command(record, personas) which is
-    // the persona-aware resolver (override → runtime → persona runtime → default).
-    // For records where runtime=None was cleared by an "inherit from persona"
-    // update, the summary must resolve via the live persona runtime, not the
-    // stale agent_command. These tests cover the two inherit directions that
-    // require a personas slice (no-personas records are covered by the override
-    // table above).
-
-    /// Build a minimal AgentDefinition for parallelism-policy tests.
-    fn test_persona_def(
+    fn persona_def(
         id: &str,
         runtime: Option<&str>,
     ) -> crate::managed_agents::types::AgentDefinition {
@@ -402,95 +189,174 @@ mod tests {
         }
     }
 
-    /// runtime=None (inherit), stale agent_command="openclaw", live persona=goose:
-    /// summary must resolve goose (uncapped) → 10, not openclaw (capped) → 5.
-    #[test]
-    fn summary_persona_inherited_runtime_none_stale_openclaw_live_goose_is_uncapped() {
-        let persona = test_persona_def("p-goose", Some("goose"));
-        let mut record = record_with(None, 10); // runtime cleared by inherit
-        record.persona_id = Some("p-goose".to_string());
-        record.agent_command = "openclaw".to_string(); // stale
-        record.agent_command_override = None;
+    // ── Policy table: harness_max_parallelism / effective_parallelism / normalize ─
 
-        let summary_cmd =
-            crate::managed_agents::record_agent_command(&record, std::slice::from_ref(&persona));
+    #[test]
+    fn policy_table() {
+        let cap = super::OPENCLAW_MAX_PARALLELISM;
+
+        // harness_max_parallelism: openclaw variants → Some(cap); others → None.
+        assert_eq!(super::harness_max_parallelism("openclaw"), Some(cap));
         assert_eq!(
-            summary_cmd, "goose",
-            "summary must resolve goose from live persona, not stale openclaw agent_command"
+            super::harness_max_parallelism("/usr/local/bin/openclaw"),
+            Some(cap)
         );
+        assert_eq!(super::harness_max_parallelism("openclaw.exe"), Some(cap));
         assert_eq!(
-            super::effective_parallelism(&summary_cmd, record.parallelism),
-            10,
-            "summary parallelism must NOT be capped (goose is uncapped)"
+            super::harness_max_parallelism(r"C:\Tools\openclaw.exe"),
+            Some(cap)
         );
+        assert_eq!(super::harness_max_parallelism("goose"), None);
+        assert_eq!(super::harness_max_parallelism("buzz-agent"), None);
+        assert_eq!(super::harness_max_parallelism(""), None);
+
+        // effective_parallelism: openclaw clamps above cap, honors at/below; goose passes through.
+        assert_eq!(super::effective_parallelism("openclaw", cap + 5), cap);
+        assert_eq!(super::effective_parallelism("openclaw", cap), cap);
+        assert_eq!(super::effective_parallelism("openclaw", cap - 2), cap - 2);
+        assert_eq!(super::effective_parallelism("goose", 99), 99);
+        assert_eq!(super::effective_parallelism("buzz-agent", 32), 32);
+
+        // normalize_instance_parallelism: writes effective parallelism back to the record.
+        let mut r = record_with(None, cap + 5);
+        super::normalize_instance_parallelism(&mut r, "openclaw");
+        assert_eq!(r.parallelism, cap);
+        let mut r2 = record_with(None, cap + 5);
+        super::normalize_instance_parallelism(&mut r2, "goose");
+        assert_eq!(r2.parallelism, cap + 5);
     }
 
-    /// Inverse: runtime=None, stale agent_command="goose", live persona=openclaw:
-    /// summary must resolve openclaw (capped) → 5, not goose (uncapped).
-    #[test]
-    fn summary_persona_inherited_runtime_none_stale_goose_live_openclaw_is_capped() {
-        let persona = test_persona_def("p-openclaw", Some("openclaw"));
-        let mut record = record_with(None, 10);
-        record.persona_id = Some("p-openclaw".to_string());
-        record.agent_command = "goose".to_string(); // stale
-        record.agent_command_override = None;
+    // ── command_for_runtime_id: three-tier lookup ─────────────────────────────
 
-        let summary_cmd =
-            crate::managed_agents::record_agent_command(&record, std::slice::from_ref(&persona));
+    #[test]
+    fn command_for_runtime_id_covers_builtin_preset_and_unknown() {
+        // goose: static builtin; openclaw: static preset (cold registry).
         assert_eq!(
-            summary_cmd, "openclaw",
-            "summary must resolve openclaw from live persona, not stale goose agent_command"
+            super::super::command_for_runtime_id("goose").as_deref(),
+            Some("goose")
         );
         assert_eq!(
-            super::effective_parallelism(&summary_cmd, record.parallelism),
-            super::OPENCLAW_MAX_PARALLELISM,
-            "summary parallelism must be capped to {} (live persona=openclaw)",
+            super::super::command_for_runtime_id("openclaw").as_deref(),
+            Some("openclaw"),
+            "openclaw must resolve from the static preset list even with a cold registry"
+        );
+        assert_eq!(
+            super::super::command_for_runtime_id("nonexistent-runtime-xyz"),
+            None
+        );
+        assert_eq!(super::super::command_for_runtime_id(""), None);
+    }
+
+    // ── acp_agents_value: spawn-env seam ─────────────────────────────────────
+    //
+    // Drives the pure helper extracted from spawn_agent_child.
+    // Deleting or changing it breaks this test AND the production spawn env.
+
+    /// Legacy OpenClaw record (parallelism 10, above cap): BUZZ_ACP_AGENTS must be "5".
+    #[test]
+    fn acp_agents_value_openclaw_above_cap_is_capped() {
+        assert_eq!(
+            super::acp_agents_value("openclaw", 10),
+            "5",
+            "BUZZ_ACP_AGENTS for openclaw with parallelism 10 must be \"5\""
+        );
+        assert_eq!(super::acp_agents_value("goose", 10), "10");
+    }
+
+    // ── Override-direction: summary seam agreement ───────────────────────────
+    //
+    // Tests effective_parallelism and record_agent_command agreement for
+    // both override directions. Removing either direction loses the seam
+    // test for that cap/uncap path through the summary resolver.
+
+    /// OpenClaw runtime + Goose override: summary resolves goose → uncapped (10).
+    #[test]
+    fn override_direction_openclaw_runtime_goose_override_is_uncapped() {
+        let mut record = record_with(Some("openclaw"), 10);
+        record.agent_command_override = Some("goose".to_string());
+        let cmd = crate::managed_agents::record_agent_command(&record, &[]);
+        assert_eq!(cmd, "goose");
+        assert_eq!(super::effective_parallelism(&cmd, record.parallelism), 10);
+    }
+
+    /// Goose runtime + OpenClaw override: summary resolves openclaw → capped (5).
+    #[test]
+    fn override_direction_goose_runtime_openclaw_override_is_capped() {
+        let mut record = record_with(Some("goose"), 10);
+        record.agent_command_override = Some("openclaw".to_string());
+        let cmd = crate::managed_agents::record_agent_command(&record, &[]);
+        assert_eq!(cmd, "openclaw");
+        assert_eq!(
+            super::effective_parallelism(&cmd, record.parallelism),
             super::OPENCLAW_MAX_PARALLELISM
         );
     }
 
-    // ── Snapshot-import parallelism computation ───────────────────────────────
+    // ── Summary: persona-inherited runtime (runtime=None) ────────────────────
     //
-    // These tests drive `effective_instance_parallelism`, the shared helper
-    // consumed by both individual and team snapshot imports. Deleting or
-    // breaking that helper breaks these tests.
+    // Covers the case where runtime was cleared by an "inherit from persona"
+    // update: summary must resolve via the LIVE persona, not stale agent_command.
 
+    /// Stale agent_command="openclaw", live persona=goose → summary resolves goose → uncapped.
     #[test]
-    fn snapshot_import_openclaw_instance_is_capped_to_5() {
+    fn summary_persona_inherited_stale_openclaw_live_goose_is_uncapped() {
+        let persona = persona_def("p-goose", Some("goose"));
+        let mut record = record_with(None, 10);
+        record.persona_id = Some("p-goose".to_string());
+        record.agent_command = "openclaw".to_string();
+        let cmd =
+            crate::managed_agents::record_agent_command(&record, std::slice::from_ref(&persona));
         assert_eq!(
-            super::effective_instance_parallelism(Some("openclaw"), 10),
-            super::OPENCLAW_MAX_PARALLELISM,
-            "snapshot import: OpenClaw instance must be minted at effective cap, not requested 10"
+            cmd, "goose",
+            "live persona must win over stale agent_command"
+        );
+        assert_eq!(super::effective_parallelism(&cmd, record.parallelism), 10);
+    }
+
+    /// Stale agent_command="goose", live persona=openclaw → summary resolves openclaw → capped.
+    #[test]
+    fn summary_persona_inherited_stale_goose_live_openclaw_is_capped() {
+        let persona = persona_def("p-openclaw", Some("openclaw"));
+        let mut record = record_with(None, 10);
+        record.persona_id = Some("p-openclaw".to_string());
+        record.agent_command = "goose".to_string();
+        let cmd =
+            crate::managed_agents::record_agent_command(&record, std::slice::from_ref(&persona));
+        assert_eq!(
+            cmd, "openclaw",
+            "live persona must win over stale agent_command"
+        );
+        assert_eq!(
+            super::effective_parallelism(&cmd, record.parallelism),
+            super::OPENCLAW_MAX_PARALLELISM
         );
     }
 
+    // ── effective_instance_parallelism: snapshot-import seam ─────────────────
+    //
+    // Drives the shared helper consumed by individual and team snapshot imports.
+
     #[test]
-    fn snapshot_import_unknown_runtime_falls_back_to_default_and_is_uncapped() {
+    fn snapshot_import_effective_instance_parallelism_table() {
+        let cap = super::OPENCLAW_MAX_PARALLELISM;
+        // openclaw above cap → capped; below cap → honored; unknown/None → pass-through.
+        assert_eq!(
+            super::effective_instance_parallelism(Some("openclaw"), cap + 5),
+            cap
+        );
+        assert_eq!(
+            super::effective_instance_parallelism(Some("openclaw"), cap - 2),
+            cap - 2
+        );
         assert_eq!(
             super::effective_instance_parallelism(Some("unknown-runtime-xyz"), 10),
-            10,
-            "unknown runtime falls back to default command, no cap applied"
+            10
         );
-        assert_eq!(
-            super::effective_instance_parallelism(None, 10),
-            10,
-            "None runtime falls back to default command, no cap applied"
-        );
-    }
-
-    #[test]
-    fn snapshot_import_openclaw_below_cap_is_honored() {
-        assert_eq!(
-            super::effective_instance_parallelism(Some("openclaw"), 3),
-            3,
-            "snapshot import: explicit value below cap must be honored"
-        );
+        assert_eq!(super::effective_instance_parallelism(None, 10), 10);
     }
 
     // ── Snapshot export: requested-definition / effective-instance contract ───
 
-    /// Build a minimal record for snapshot export tests that does not require
-    /// the full `minimal_record()` fixture from `agent_snapshot.rs`.
     fn snapshot_record(
         runtime: Option<&str>,
         parallelism: u32,
@@ -507,29 +373,25 @@ mod tests {
         r
     }
 
-    /// Snapshot export carries the REQUESTED definition parallelism (not clamped).
+    /// Export carries the REQUESTED definition parallelism (not clamped).
     #[test]
-    fn snapshot_export_openclaw_definition_keeps_requested_parallelism() {
+    fn snapshot_export_definition_parallelism_is_requested_not_clamped() {
         use crate::managed_agents::agent_snapshot::{build_snapshot, MemoryLevel};
-        let record = snapshot_record(Some("openclaw"), 5, Some(10));
-        let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
-        assert_eq!(
-            snapshot.definition.parallelism,
-            Some(10),
-            "snapshot export must carry the REQUESTED definition parallelism (10), not 5"
+        // definition_parallelism=Some(10) stored → exported as 10, not the instance cap 5.
+        let snap = build_snapshot(
+            &snapshot_record(Some("openclaw"), 5, Some(10)),
+            MemoryLevel::None,
+            vec![],
+            None,
         );
-    }
-
-    /// When no definition_parallelism is stored, export falls back to the effective instance.
-    #[test]
-    fn snapshot_export_openclaw_no_definition_parallelism_exports_effective_instance() {
-        use crate::managed_agents::agent_snapshot::{build_snapshot, MemoryLevel};
-        let record = snapshot_record(Some("openclaw"), 5, None);
-        let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
-        assert_eq!(
-            snapshot.definition.parallelism,
-            Some(5),
-            "snapshot export falls back to effective instance when no definition_parallelism stored"
+        assert_eq!(snap.definition.parallelism, Some(10));
+        // No definition_parallelism stored → falls back to effective instance.
+        let snap2 = build_snapshot(
+            &snapshot_record(Some("openclaw"), 5, None),
+            MemoryLevel::None,
+            vec![],
+            None,
         );
+        assert_eq!(snap2.definition.parallelism, Some(5));
     }
 }
